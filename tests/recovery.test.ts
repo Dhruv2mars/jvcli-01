@@ -235,3 +235,62 @@ describe("delete safety", () => {
     }
   });
 });
+
+describe("fault injection (JVCLI_FAULT)", () => {
+  test("crash after objects_durable retries into the same world", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "FI1");
+      writeWs(repo, a.id, "fi.txt", "fault\n");
+      const op = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+      const crashed = runCliJson(repo, ["publish", a.id, "--operation-id", op], { JVCLI_FAULT: "publish:after-objects-durable" });
+      expect(crashed.code).not.toBe(0);
+      expect(runCliJson(repo, ["verify", "--full"]).code).toBe(0);
+      const retry = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
+      expect(retry.code).toBe(0);
+      expect(retry.json.seq).toBe(2);
+      const again = runCliJson(repo, ["history", "--world"]);
+      expect((again.json.worlds as Array<any>)).toHaveLength(2);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("crash after world-created retries without duplicating the version", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "FI2");
+      writeWs(repo, a.id, "fi.txt", "fault\n");
+      const op = "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2";
+      expect(runCliJson(repo, ["publish", a.id, "--operation-id", op], { JVCLI_FAULT: "publish:after-world-created" }).code).not.toBe(0);
+      expect(runCliJson(repo, ["verify", "--full"]).code).toBe(0);
+      const retry = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
+      expect(retry.code).toBe(0);
+      expect(retry.json.seq).toBe(2);
+      expect((runCliJson(repo, ["history", "--world"]).json.worlds as Array<any>)).toHaveLength(2);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("crash after accepted recovers the existing world on retry", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "FI3");
+      writeWs(repo, a.id, "fi.txt", "fault\n");
+      const op = "f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3";
+      expect(runCliJson(repo, ["publish", a.id, "--operation-id", op], { JVCLI_FAULT: "publish:after-accepted" }).code).not.toBe(0);
+      expect(runCliJson(repo, ["verify", "--full"]).code).toBe(0);
+      const retry = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
+      expect(retry.code).toBe(0);
+      expect(retry.json.status).toBe("recovered");
+      expect(retry.json.seq).toBe(2);
+      expect((runCliJson(repo, ["history", "--world"]).json.worlds as Array<any>)).toHaveLength(2);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+});

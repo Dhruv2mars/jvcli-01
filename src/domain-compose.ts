@@ -46,6 +46,17 @@ async function materializeMerged(repo: Repo, ws: string, merged: { files: Map<st
   return rootId;
 }
 
+function faultPoint(name: string): boolean {
+  const raw = (process.env.JVCLI_FAULT ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return raw.includes(name);
+}
+
+async function crashIf(name: string): Promise<never | void> {
+  if (faultPoint(name)) {
+    throw fail(CODES.interrupted, `fault injected at ${name}`, { retryable: true, hint: "retry the operation" });
+  }
+}
+
 export async function publishLayer(repo: Repo, selector: string, opts: PublishOptions): Promise<PublishResult> {
   const refs0 = await loadRefs(repo.metaDir);
   const ref0 = resolveLayerRef(refs0, selector);
@@ -108,6 +119,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
   const exec = new Map([...merged.files.keys()].map((path) => [path, execOf(path)] as const));
   const finalRoot = await materializeMerged(repo, layerWorkspaceDir(repo, ref.id), { files: new Map(merged.files), symlinks: new Map(merged.symlinks) }, exec);
   await updateJournal(repo.metaDir, operationId, { state: "objects_durable", payload: { checkpoint: cpId, root: finalRoot } });
+  await crashIf("publish:after-objects-durable");
   const contextIds = await collectLayerContexts(repo, [ref.id]);
   const pubBytes = encodePublication({
     layerId: ref.id,
@@ -131,6 +143,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
     contextIds
   });
   const worldId = await repo.store.put(worldBytes);
+  await crashIf("publish:after-world-created");
   const snapshot = await loadRefs(repo.metaDir);
   const cur2 = await loadRefs(repo.metaDir);
   const still = cur2.layers[ref.id]!;
@@ -156,6 +169,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
   const ok = await casRefs(repo.metaDir, snapshot, swapped);
   if (!ok) throw fail(CODES.busy, "concurrent publish; retry", { layerId: ref.id, operationId, retryable: true });
   await updateJournal(repo.metaDir, operationId, { state: "accepted", payload: { worldId } });
+  await crashIf("publish:after-accepted");
   await updateJournal(repo.metaDir, operationId, { state: "finalized", payload: { worldId } });
   return { seq: prior.seq + 1, worldId, status: "published", operationId };
 }
