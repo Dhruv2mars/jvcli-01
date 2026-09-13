@@ -49,7 +49,6 @@ async function materializeMerged(repo: Repo, ws: string, merged: { files: Map<st
 export async function publishLayer(repo: Repo, selector: string, opts: PublishOptions): Promise<PublishResult> {
   const refs0 = await loadRefs(repo.metaDir);
   const ref0 = resolveLayerRef(refs0, selector);
-  if (ref0.state !== "active") throw fail(CODES.layerState, `layer is ${ref0.state}`, { layerId: ref0.id });
   const operationId = (opts.operationId ?? newId16()).toLowerCase();
   const existing = await readJournal(repo.metaDir, operationId);
   if (existing !== null) {
@@ -60,6 +59,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
       return { seq: decodeWorldVersion(wbytes).seq, worldId: wid, status: "recovered", operationId };
     }
   } else {
+    if (ref0.state !== "active") throw fail(CODES.layerState, `layer is ${ref0.state}`, { layerId: ref0.id });
     await appendJournal(repo.metaDir, {
       op: operationId,
       kind: "publish",

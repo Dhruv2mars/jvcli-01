@@ -15,4 +15,5 @@ jobs:
       - run: bun run build
       - run: bun run typecheck
       - run: bun test
+      - run: scripts/ga-walkthrough.sh dist/cli-entry.js
       - run: bun benchmarks/run.ts --layers 5 --files 5
