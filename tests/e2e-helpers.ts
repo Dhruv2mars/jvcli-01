@@ -25,9 +25,17 @@ export interface CliJsonResult extends CliResult {
 
 /** Spawn `node <CLI_PATH> ...args` with cwd set to the repo dir. */
 export function runCli(repoDir: string, args: ReadonlyArray<string>, env?: Record<string, string>): CliResult {
-  const r = spawnSync("node", [CLI_PATH, ...args], { cwd: repoDir, encoding: "utf8", env: { ...process.env, ...(env ?? {}) } });
+  const r = spawnSync("node", [CLI_PATH, ...args], {
+    cwd: repoDir,
+    encoding: "utf8",
+    env: { ...process.env, ...(env ?? {}) },
+    maxBuffer: 64 * 1024 * 1024
+  });
+  if (r.error !== undefined) {
+    return { code: 1, stdout: "", stderr: `spawn failed: ${(r.error as Error).message}` };
+  }
   return {
-    code: r.status ?? 1,
+    code: r.status ?? (r.signal !== null ? 1 : 0),
     stdout: typeof r.stdout === "string" ? r.stdout : String(r.stdout ?? ""),
     stderr: typeof r.stderr === "string" ? r.stderr : String(r.stderr ?? "")
   };
@@ -64,9 +72,9 @@ export function mkTempRepo(seed: Record<string, string> = { "a.txt": "hello\n" }
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, content);
   }
-  const r = spawnSync("node", [CLI_PATH, "init", repo], { cwd: base, encoding: "utf8" });
-  if (r.status !== 0) {
-    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+  const r = spawnSync("node", [CLI_PATH, "init", repo], { cwd: base, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (r.error !== undefined || r.status !== 0) {
+    const out = r.error !== undefined ? `spawn failed: ${(r.error as Error).message}` : `${r.stdout ?? ""}${r.stderr ?? ""}`;
     rmSync(base, { recursive: true, force: true });
     throw new Error(`jvcli init failed: ${out}`);
   }
