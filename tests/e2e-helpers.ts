@@ -35,7 +35,7 @@ export function runCli(repoDir: string, args: ReadonlyArray<string>, env?: Recor
     return { code: 1, stdout: "", stderr: `spawn failed: ${(r.error as Error).message}` };
   }
   return {
-    code: r.status ?? (r.signal !== null ? 1 : 0),
+    code: r.status ?? 1,
     stdout: typeof r.stdout === "string" ? r.stdout : String(r.stdout ?? ""),
     stderr: typeof r.stderr === "string" ? r.stderr : String(r.stderr ?? "")
   };
