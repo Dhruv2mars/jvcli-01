@@ -77,7 +77,7 @@ Usage:
   jvcli context sessions [--layer <id>] [--json]
   jvcli context show <session-or-manifest> [--json]
   jvcli context begin --layer <id> [--session <id>] [--parent <id>] [--agent <a>] [--format <f>] [--json]
-  jvcli context append --layer <id> --session <id> --kind <k> [--text <t>] [--file <p>] [--json]
+  jvcli context append --layer <id> --session <id> --kind <k> [--ordinal <n>] [--text <t>] [--file <p>] [--json]
   jvcli context end --layer <id> --session <id> [--interrupted] [--json]
 `;
 
@@ -511,6 +511,12 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
           if (layer === null || layer === undefined || layer === "" || session === null || session === "") {
             throw fail(CODES.invalidPath, "context append needs --layer and --session");
           }
+          const ordinalFlag = flag(rest2, "--ordinal");
+          let ordinal: number | undefined;
+          if (ordinalFlag !== null && ordinalFlag !== "") {
+            ordinal = Number(ordinalFlag);
+            if (!Number.isSafeInteger(ordinal) || ordinal < 0) throw fail(CODES.invalidPath, "ordinal must be a non-negative integer");
+          }
           const text = flag(rest2, "--text");
           const file = flag(rest2, "--file");
           let bytes: Uint8Array;
@@ -523,7 +529,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
           }
           const refs = await loadRefs(repo.metaDir);
           const ref = resolveLayerRef(refs, layer);
-          const r = await sessionAppend(repo, ref.id, session, [{ kind, bytes }]);
+          const r = await sessionAppend(repo, ref.id, session, [{ kind, bytes, ordinal, format: undefined }]);
           emit(out(`manifest: ${r.manifest}\nobjects: ${r.objects.length}\n`, { ok: true, ...r }), j);
           return;
         }

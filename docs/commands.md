@@ -482,10 +482,13 @@ Exit codes: `1` for unknown layers, bad session ids, or agent conflicts.
 
 ## context append
 
-Usage: `jvcli context append --layer <id> --session <id> --kind <k> [--text <t>] [--file <p>] [--json]`
+Usage: `jvcli context append --layer <id> --session <id> --kind <k> [--ordinal <n>] [--text <t>] [--file <p>] [--json]`
 
 Appends one context object to a session. `--kind` defaults to `note`. Exactly
-one of `--text <t>` or `--file <p>` is required.
+one of `--text <t>` or `--file <p>` is required. `--ordinal <n>` pins the
+record ordinal for adapters that retransmit; without it the next free ordinal
+is used. Duplicate ordinals fail, appends to a sealed session fail, and a gap
+in the ordinal sequence marks the manifest completeness `3` with gap ranges.
 
 Example:
 
