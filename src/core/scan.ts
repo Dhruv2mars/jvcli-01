@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { IGNORE_FILE, ignoreMatch, JV_DIR, normalizePath, parseIgnoreFile, type IgnoreRule } from "./paths.js";
+import { modeIsExecutable } from "./workspace/exec.js";
 
 export interface ScanResult {
   readonly files: Map<string, { bytes: Uint8Array; executable: boolean }>;
@@ -12,8 +13,7 @@ export interface ScanResult {
 async function executableBit(path: string): Promise<boolean> {
   try {
     const st = await stat(path);
-    // eslint-disable-next-line no-bitwise
-    return (st.mode & 0o111) !== 0;
+    return modeIsExecutable(st.mode);
   } catch {
     return false;
   }

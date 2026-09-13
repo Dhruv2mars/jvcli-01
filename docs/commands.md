@@ -132,6 +132,28 @@ JSON shapes:
 
 Exit codes: `1` when neither `--world` nor a resolvable `--layer` is given.
 
+## timeline
+
+Usage: `jvcli timeline [--layer <id>] [--kind <kind>] [--limit <n>] [--json]`
+
+Reads worlds, publications, checkpoints, refresh and stack records, context
+manifests, and journals into one flat row list. Writes nothing. Rows sort by
+world sequence, then by kind in the order world, publish, checkpoint, refresh
+and stack, context, journal. Journal rows that resolve to no sequence sort
+last by update time. `--kind` keeps one of `world`, `publish`,
+`checkpoint`, `refresh`, `stack`, `context`, or `journal`. `--limit` keeps
+the first rows after sorting. `--layer` keeps rows for that layer.
+
+Example:
+
+```sh
+jvcli timeline --kind world --json
+```
+
+JSON shape: `{ ok, rows: [{ t: { seq, at }, kind, id, layer, operation, detail }] }`.
+No row carries payload bytes or workspace paths.
+Exit codes: `1` for a bad `--kind`, a bad `--limit`, or an unreadable root.
+
 ## show
 
 Usage: `jvcli show <object-or-version> [--json]`
@@ -530,3 +552,41 @@ jvcli context end --layer my-feature --session 9f2c --json
 
 JSON shape: `{ ok, manifest }`.
 Exit codes: `1` for unknown layers or sessions.
+
+## checkpoint
+
+Usage: `jvcli checkpoint --layer <id> [--json]` or `jvcli checkpoint --all [--json]`
+
+Checkpoints one dirty layer now, or every dirty active layer with `--all`.
+Clean layers report `created: false` with exit `0`. Each checkpoint writes a
+journal entry, a checkpoint object, and advances the layer reference.
+
+Example:
+
+```sh
+jvcli checkpoint --all --json
+```
+
+JSON shapes: `{ ok, repo, layer, checkpoint, created }` for one layer,
+`{ ok, repo, created, checkpoints: [{ layer, checkpoint, created }] }` for `--all`.
+Exit codes: `1` for an unknown layer or for `--all` combined with a layer.
+
+## watch
+
+Usage: `jvcli watch [--interval <ms>] [--once] [--layer <id>] [--json]`
+
+Polls workspaces and checkpoints dirty layers through the checkpoint engine.
+Requests coalesce by layer. `--interval` sets the pause between cycles in
+milliseconds, from `250` to `60000`, default `2000`. `--once` runs one cycle
+and exits. Without `--once` the loop runs until it receives `SIGINT` or
+`SIGTERM`, which stop it with exit `0`. `--layer` watches one layer,
+resolved by name, id, or current workspace.
+
+Example:
+
+```sh
+jvcli watch --once --json
+```
+
+JSON shape per cycle: `{ ok, repo, cycle, interval, checked, dirty, checkpointed, checkpoints }`.
+Exit codes: `1` for a bad `--interval` or an unknown layer.
