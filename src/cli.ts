@@ -115,13 +115,11 @@ function guardPipe(): void {
   if (pipeGuarded) return;
   pipeGuarded = true;
   process.stdout.on("error", (e: Error & { code?: string }) => {
-    if (e.code === "EPIPE") {
-      process.exitCode = 1;
-      process.stdout.destroy();
-    }
+    process.exitCode = 1;
+    if (e.code === "EPIPE") process.stdout.destroy();
   });
-  process.stderr.on("error", (e: Error & { code?: string }) => {
-    if (e.code === "EPIPE") process.exitCode = 1;
+  process.stderr.on("error", () => {
+    process.exitCode = 1;
   });
 }
 
