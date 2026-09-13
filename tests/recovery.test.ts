@@ -2,6 +2,43 @@ import { describe, test, expect } from "bun:test";
 import { createLayer, mkTempRepo, rmTemp, runCli, runCliJson, writeWs } from "./e2e-helpers";
 
 describe("recovery / gc / verify flows", () => {
+  test("stale disjoint publish auto-merges without manual refresh", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "A");
+      const b = createLayer(repo, "B");
+      writeWs(repo, a.id, "aa.txt", "from-a\n");
+      writeWs(repo, b.id, "bb.txt", "from-b\n");
+
+      expect(runCliJson(repo, ["publish", a.id]).code).toBe(0);
+      const merged = runCliJson(repo, ["publish", b.id]);
+      expect(merged.code).toBe(0);
+      expect(merged.json.seq).toBe(3);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("overlapping stale publish conflicts with the path", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "A");
+      const b = createLayer(repo, "B");
+      writeWs(repo, a.id, "a.txt", "from-a\n");
+      writeWs(repo, b.id, "a.txt", "from-b\n");
+
+      expect(runCliJson(repo, ["publish", a.id]).code).toBe(0);
+      const conflict = runCliJson(repo, ["publish", b.id]);
+      expect(conflict.code).not.toBe(0);
+      expect(conflict.json.error.code).toBe("E_CONFLICT");
+      expect(JSON.stringify(conflict.json.error.paths ?? conflict.json.error.message)).toContain("a.txt");
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
   test("publish with explicit --operation-id twice => same world, one new version", () => {
     const t = mkTempRepo({ "a.txt": "base\n" });
     try {
@@ -30,42 +67,6 @@ describe("recovery / gc / verify flows", () => {
       expect(hist.json.worlds.map((w: any) => w.seq)).toEqual([1, 2]);
     } finally {
       rmTemp(t.base);
-    }
-  });
-
-  test("stale disjoint publish auto-merges; overlapping stale publish conflicts", () => {
-    const t = mkTempRepo({ "a.txt": "base\n" });
-    try {
-      const repo = t.repo;
-      const a = createLayer(repo, "A");
-      const b = createLayer(repo, "B");
-      writeWs(repo, a.id, "aa.txt", "from-a\n");
-      writeWs(repo, b.id, "bb.txt", "from-b\n");
-
-      expect(runCliJson(repo, ["publish", a.id]).code).toBe(0);
-      // B is stale (anchored at v1) but disjoint: auto-merge => v3.
-      const merged = runCliJson(repo, ["publish", b.id]);
-      expect(merged.code).toBe(0);
-      expect(merged.json.seq).toBe(3);
-    } finally {
-      rmTemp(t.base);
-    }
-
-    const t2 = mkTempRepo({ "a.txt": "base\n" });
-    try {
-      const repo = t2.repo;
-      const a = createLayer(repo, "A");
-      const b = createLayer(repo, "B");
-      writeWs(repo, a.id, "a.txt", "from-a\n");
-      writeWs(repo, b.id, "a.txt", "from-b\n");
-
-      expect(runCliJson(repo, ["publish", a.id]).code).toBe(0);
-      const conflict = runCliJson(repo, ["publish", b.id]);
-      expect(conflict.code).not.toBe(0);
-      expect(conflict.json.error.code).toBe("E_CONFLICT");
-      expect(JSON.stringify(conflict.json.error.paths ?? conflict.json.error.message)).toContain("a.txt");
-    } finally {
-      rmTemp(t2.base);
     }
   });
 
