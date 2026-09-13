@@ -13,7 +13,7 @@ import {
 } from "./core/objects.js";
 import { hashTree, hydrate, readFlat, TreeStager } from "./core/tree-stage.js";
 import { normalizePath } from "./core/paths.js";
-import { appendJournal, listJournals, loadRefs, readJournal, resolveLayerRef, saveRefs, updateJournal, type LayerRef } from "./core/refs.js";
+import { appendJournal, casRefs, listJournals, loadRefs, readJournal, resolveLayerRef, saveRefs, updateJournal, type LayerRef } from "./core/refs.js";
 import { clearWorkspace, materializeTree, removeLayerMarker, scanDirectory, writeLayerMarker } from "./core/scan.js";
 import { CODES, fail, type LayerState } from "./core/types.js";
 import { currentWorldId, flattenRoot, layerWorkspaceDir, openRepo, resolveWorldSelector, type Repo } from "./core/repo.js";
@@ -365,9 +365,32 @@ export async function deleteLayer(repo: Repo, selector: string): Promise<void> {
       hint: "a concurrent operation touched the layer; retry the delete"
     });
   }
+  for (const entry of await listJournals(repo.metaDir)) {
+    if (entry.operationId === opId) continue;
+    if (entry.state === "finalized" || entry.state === "accepted" || entry.state === "conflict") continue;
+    const cites = entry.layerId === ref.id || JSON.stringify(entry.payload).includes(ref.id) || JSON.stringify(entry.payload).includes(live.checkpoint);
+    if (cites) {
+      await updateJournal(repo.metaDir, opId, { state: "finalized" });
+      throw fail(CODES.busy, `layer ${ref.id} gained a live ${entry.kind} operation ${entry.operationId}; retry after it settles`, {
+        layerId: ref.id,
+        operationId: entry.operationId,
+        retryable: true,
+        hint: "retry the delete once the operation finalizes"
+      });
+    }
+  }
   const next = structuredClone(cur);
   next.layers[ref.id] = { ...live, state: "deleted", workspace: null, deletedAt: new Date().toISOString(), deleteOp: opId };
-  await saveRefs(repo.metaDir, next);
+  const swapped = await casRefs(repo.metaDir, cur, next);
+  if (!swapped) {
+    await updateJournal(repo.metaDir, opId, { state: "finalized" });
+    throw fail(CODES.busy, `layer ${ref.id} changed during delete; retry`, {
+      layerId: ref.id,
+      operationId: opId,
+      retryable: true,
+      hint: "a concurrent operation touched the layer; retry the delete"
+    });
+  }
   await rm(layerWorkspaceDir(repo, ref.id), { recursive: true, force: true });
   await updateJournal(repo.metaDir, opId, { state: "finalized" });
 }
