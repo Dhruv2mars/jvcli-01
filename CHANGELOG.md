@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+Added:
+
+- `JVCLI_FAULT` crash points for publish recovery with retry tests.
+- `context append --ordinal` with gap tracking and completeness 3.
+- Workspace autodetect through the `.jvcli-layer` marker.
+- Diagnostics bundle with journal states, layer states, and verify summary.
+- `scripts/ga-walkthrough.sh` plus `scripts/pack-smoke.sh`, both gated in CI.
+- Reference-model property tests for the merge engine.
+- Measured performance budgets at 5 and 100 layers.
+
+Fixed:
+
+- Clone and child now flush dirty sources before branching.
+- Publish op-id retry resumes finalized operations instead of failing.
+- GC pins live journal objects and quarantines fresh writes.
+- Delete refuses while a live journal cites the layer.
+- Journal-checkpoint adopt on retry uses compare-and-swap.
+
 ## [0.1.0] - 2026-09-13
 
 Initial v1 release of `jvcli`, local agent native version control.

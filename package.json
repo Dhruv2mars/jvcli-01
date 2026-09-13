@@ -25,7 +25,9 @@
     "dev": "bun src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "bench": "bun benchmarks/run.ts"
+    "bench": "bun benchmarks/run.ts",
+    "prepack": "bun run build",
+    "pack:smoke": "sh scripts/pack-smoke.sh"
   },
   "dependencies": {
     "@noble/hashes": "^2.4.0",
