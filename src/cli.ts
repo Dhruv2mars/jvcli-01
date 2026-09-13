@@ -20,8 +20,10 @@ import {
   renameLayer
 } from "./domain-layers.js";
 import { publishLayer, stackLayers } from "./domain-compose.js";
+import { checkpointAllLayers, checkpointSingleLayer, parseWatchInterval, runWatchCycle } from "./domain-watch.js";
 import { layerContextStatus, sessionAppend, sessionEnd, sessionStart } from "./domain-context.js";
 import { gcRepo, verifyRepo } from "./domain-verify.js";
+import { formatTimelineHuman, timelineRepo } from "./domain-timeline.js";
 import { loadRefs, resolveLayerRef } from "./core/refs.js";
 import { decodeCheckpoint, decodeContextManifest, decodeWorldVersion, diffTrees } from "./core/objects.js";
 import { findRepoRoot, findLayerForCwd } from "./locate.js";
@@ -57,6 +59,7 @@ Usage:
   jvcli init [path]
   jvcli status [--layer <id>] [--json]
   jvcli history [--world | --layer <id>] [--json]
+  jvcli timeline [--layer <id>] [--kind <kind>] [--limit <n>] [--json]
   jvcli show <object-or-version> [--json]
   jvcli diff <left> [right] [--json]
   jvcli verify [--full] [--json]
@@ -80,9 +83,22 @@ Usage:
   jvcli context begin --layer <id> [--session <id>] [--parent <id>] [--agent <a>] [--format <f>] [--json]
   jvcli context append --layer <id> --session <id> --kind <k> [--ordinal <n>] [--text <t>] [--file <p>] [--json]
   jvcli context end --layer <id> --session <id> [--interrupted] [--json]
+  jvcli checkpoint --layer <id> [--json]
+  jvcli checkpoint --all [--json]
+  jvcli watch [--interval <ms>] [--once] [--layer <id>] [--json]
 `;
 
-const VALUE_FLAGS = new Set(["--layer", "--name", "--from", "--checkpoint", "--into", "--operation-id", "--output", "--session", "--parent", "--agent", "--format", "--kind", "--ordinal", "--text", "--file"]);
+const VALUE_FLAGS = new Set(["--layer", "--name", "--from", "--checkpoint", "--into", "--operation-id", "--output", "--session", "--parent", "--agent", "--format", "--kind", "--ordinal", "--text", "--file", "--interval", "--limit"]);
+
+function assertKnownFlags(args: ReadonlyArray<string>, allowed: ReadonlySet<string>, usage: string): void {
+  let i = 0;
+  while (i < args.length) {
+    const a = args[i]!;
+    if (!a.startsWith("--")) { i++; continue; }
+    if (!allowed.has(a)) throw fail(CODES.invalidPath, `unknown flag ${a} (${usage})`);
+    if (VALUE_FLAGS.has(a)) i += 2; else i++;
+  }
+}
 
 function flag(args: ReadonlyArray<string>, name: string): string | null {
   const i = args.indexOf(name);
@@ -131,6 +147,15 @@ function emit(o: Output, json: boolean): void {
 
 async function repoRootOrThrow(start: string): Promise<string> {
   return findRepoRoot(start);
+}
+
+function resolveRepoStart(explicitPaths: ReadonlyArray<string | null | undefined>): string {
+  for (const p of explicitPaths) {
+    if (p !== null && p !== undefined && p !== "") return p;
+  }
+  const envRepo = process.env.JVCLI_REPO;
+  if (envRepo !== undefined && envRepo !== "") return envRepo;
+  return process.cwd();
 }
 
 export function runCli(argv: ReadonlyArray<string>) {
@@ -228,9 +253,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
           lines.push(`v${seq} ${id}`);
           items.push({ seq, id, root: w.rootId, prev: w.prevId, publication: w.publicationId, contexts: w.contextIds });
         }
-        if (flag(args, "--layer") !== null) {
-          // fallthrough to layer history below
-        } else {
+        if (flag(args, "--layer") === null) {
           emit(out(`${lines.join("\n")}\n`, { ok: true, repo: repo.repoId, worlds: items }), json);
           return;
         }
@@ -248,6 +271,26 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
         cur = cp.prevId;
       }
       emit(out(`${chain.map((c) => c.id).join("\n")}\n`, { ok: true, repo: repo.repoId, layer: ref.id, checkpoints: chain }), json);
+      return;
+    }
+    case "timeline": {
+      assertKnownFlags(args, new Set(["--json", "--layer", "--kind", "--limit"]), "usage: jvcli timeline [--layer <id>] [--kind <kind>] [--limit <n>] [--json]");
+      const layerFlag = flag(args, "--layer");
+      const kindFlag = flag(args, "--kind");
+      const limitRaw = flag(args, "--limit");
+      if (layerFlag === "") throw fail(CODES.invalidPath, "timeline --layer needs a value");
+      if (kindFlag === "") throw fail(CODES.invalidPath, "timeline --kind needs a value");
+      let limit: number | null = null;
+      if (limitRaw !== null) {
+        if (limitRaw === "") throw fail(CODES.invalidPath, "timeline --limit needs a value");
+        const n = Number(limitRaw);
+        if (!Number.isSafeInteger(n) || n < 0) throw fail(CODES.invalidPath, "timeline --limit must be a non-negative integer");
+        limit = n;
+      }
+      if (positionals(args).length > 0) throw fail(CODES.invalidPath, "timeline takes no positional args (usage: jvcli timeline [--layer <id>] [--kind <kind>] [--limit <n>] [--json])");
+      const root = await repoRootOrThrow(process.cwd());
+      const { rows } = await timelineRepo(root, { layer: layerFlag, kind: kindFlag, limit });
+      emit(out(formatTimelineHuman(rows), { ok: true, rows }), json);
       return;
     }
     case "show": {
@@ -293,25 +336,13 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
           const refs = await loadRefs(repo.metaDir);
           if (refs.worldsBySeq[s] !== undefined) return flattenRootId(repo, refs.worldsBySeq[s]!);
         }
-        try {
-          const wid = await resolveWorldSelector(repo, s);
-          return flattenRootId(repo, wid);
-        } catch {
-          // layer selector or checkpoint id
-        }
-        try {
-          const refs = await loadRefs(repo.metaDir);
-          const ref = resolveLayerRef(refs, s);
-          return decodeCheckpoint(await repo.store.readChecked(ref.checkpoint, 4)).rootId;
-        } catch {
-          // raw root/tree/checkpoint id
-        }
-        try {
-          const cp = decodeCheckpoint(await repo.store.read(s));
-          return cp.rootId;
-        } catch {
-          // raw tree root
-        }
+        const wid = await resolveWorldSelector(repo, s).catch(() => null);
+        if (wid !== null) return flattenRootId(repo, wid);
+        const refs = await loadRefs(repo.metaDir);
+        const ref = await Promise.resolve().then(() => resolveLayerRef(refs, s)).catch(() => null);
+        if (ref !== null) return decodeCheckpoint(await repo.store.readChecked(ref.checkpoint, 4)).rootId;
+        const cp = await repo.store.read(s).then((b) => decodeCheckpoint(b)).catch(() => null);
+        if (cp !== null) return cp.rootId;
         return s.toLowerCase();
       };
       const lroot = await resolveState(left);
@@ -362,12 +393,9 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       for (const l of Object.values(refs.layers)) {
         layerStates[l.state] = (layerStates[l.state] ?? 0) + 1;
         if (l.state === "deleted") continue;
-        try {
-          const cp = decodeCheckpoint(await repo.store.readChecked(l.checkpoint, 4));
-          if (cp.anchorId !== curId) staleLayers++;
-        } catch {
-          // unreadable checkpoint surfaces in verify, not here
-        }
+        const cp = await repo.store.readChecked(l.checkpoint, 4).then((b) => decodeCheckpoint(b)).catch(() => null);
+        if (cp === null) continue;
+        if (cp.anchorId !== curId) staleLayers++;
       }
       const bundle = {
         version: 1,
@@ -504,6 +532,65 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       emit(out(`published v${r.seq}: ${r.worldId}\n`, { ok: true, seq: r.seq, world: r.worldId, operation: r.operationId, status: r.status }), json);
       return;
     }
+    case "checkpoint": {
+      assertKnownFlags(args, new Set(["--json", "--all", "--layer"]), "usage: jvcli checkpoint --layer <id> [--json] | jvcli checkpoint --all [--json]");
+      {
+        const all = has(args, "--all");
+        const layerFlag = flag(args, "--layer");
+        const extra = positionals(args);
+        if (all && (layerFlag !== null || extra.length > 0)) throw fail(CODES.invalidPath, "checkpoint --all takes no layer (usage: jvcli checkpoint --all [--json])");
+        if (!all && extra.length > 0 && layerFlag === null) {
+          if (extra.length > 1) throw fail(CODES.invalidPath, "checkpoint needs --layer <id> or --all (usage: jvcli checkpoint --layer <id> [--json])");
+        }
+        const root = await repoRootOrThrow(process.cwd());
+        const repo = await openRepo(root);
+        if (all) {
+          const items = await checkpointAllLayers(repo);
+          const created = items.filter((c) => c.created).length;
+          emit(out(created === 0 ? `checkpoints: 0 created, ${items.length} clean\n` : `${items.map((c) => `checkpoint ${c.layer.slice(0, 12)}: ${c.checkpoint}${c.created ? "" : " (clean)"}`).join("\n")}\n`, { ok: true, repo: repo.repoId, created, checkpoints: items }), json);
+          return;
+        }
+        const sel = layerFlag !== null && layerFlag !== "" ? layerFlag : (extra[0] ?? (await findLayerForCwd(process.cwd()).catch(() => null)));
+        if (sel === null || sel === undefined || sel === "") throw fail(CODES.invalidPath, "checkpoint needs --layer <id> or --all (usage: jvcli checkpoint --layer <id> [--json])");
+        const r = await checkpointSingleLayer(repo, sel);
+        emit(out(r.created ? `checkpoint ${r.layerId.slice(0, 12)}: ${r.checkpoint}\n` : `clean ${r.layerId.slice(0, 12)}: ${r.checkpoint}\n`, { ok: true, repo: repo.repoId, layer: r.layerId, checkpoint: r.checkpoint, created: r.created }), json);
+        return;
+      }
+    }
+    case "watch": {
+      assertKnownFlags(args, new Set(["--json", "--once", "--layer", "--interval"]), "usage: jvcli watch [--interval <ms>] [--once] [--layer <id>] [--json]");
+      {
+        if (positionals(args).length > 0) throw fail(CODES.invalidPath, "watch takes no positional args (usage: jvcli watch [--interval <ms>] [--once] [--layer <id>] [--json])");
+        const layerFlag = flag(args, "--layer");
+        if (layerFlag === "") throw fail(CODES.invalidPath, "watch --layer needs a value");
+        const onlyOnce = has(args, "--once");
+        const intervalRaw = flag(args, "--interval");
+        const interval = parseWatchInterval(intervalRaw);
+        const sel: string | null = layerFlag !== null && layerFlag !== "" ? layerFlag : (await findLayerForCwd(process.cwd()).catch(() => null));
+        const root = await repoRootOrThrow(process.cwd());
+        const repo = await openRepo(root);
+        let cycle = 0;
+        let stopped = false;
+        const onSignal = (): void => { stopped = true; };
+        process.once("SIGINT", onSignal);
+        process.once("SIGTERM", onSignal);
+        try {
+          for (;;) {
+            cycle++;
+            const c = await runWatchCycle(repo, sel);
+            const line = `watch cycle ${cycle}: checked ${c.checked}, dirty ${c.dirty}, checkpointed ${c.checkpointed}`;
+            emit(out(`${line}\n`, { ok: true, repo: repo.repoId, cycle, interval, checked: c.checked, dirty: c.dirty, checkpointed: c.checkpointed, checkpoints: c.checkpoints }), json);
+            if (onlyOnce || stopped) return;
+            await new Promise<void>((resolve) => setTimeout(resolve, interval));
+            if (stopped) return;
+          }
+        } finally {
+          process.removeListener("SIGINT", onSignal);
+          process.removeListener("SIGTERM", onSignal);
+        }
+        return;
+      }
+    }
     case "context": {
       const sub = args[0];
       const rest2 = args.slice(1);
@@ -538,16 +625,10 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
               if (mid.toLowerCase().startsWith(sel.toLowerCase())) manifestId = mid;
             }
           }
-          if (manifestId !== null && manifestId.toLowerCase().startsWith(sel.toLowerCase())) {
-            // resolved
-          }
           if (manifestId === null) {
-            try {
-              manifestId = sel.toLowerCase();
-              await repo.store.readChecked(manifestId, 6);
-            } catch {
-              throw fail(CODES.invalidPath, `no such session: ${sel}`);
-            }
+            const direct = await repo.store.readChecked(sel.toLowerCase(), 6).then(() => sel.toLowerCase()).catch(() => null);
+            if (direct === null) throw fail(CODES.invalidPath, `no such session: ${sel}`);
+            manifestId = direct;
           }
           const m = decodeContextManifest(await repo.store.readChecked(manifestId, 6));
           emit(out(`session ${m.sessionId} completeness=${m.completeness} objects=${m.objectIds.length}\n`, { ok: true, manifest: manifestId, ...m }), j);

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { decodeTree } from "./core/cbor.js";
 import { decodeCheckpoint, decodeContextManifest, decodeWorldVersion, decodePublication, decodeRefresh, decodeStack } from "./core/objects.js";
 import { unwrapObject } from "./core/cbor.js";
-import { listJournals, loadRefs } from "./core/refs.js";
+import { listJournals, loadRefs, type JournalEntry } from "./core/refs.js";
 import { CODES, fail } from "./core/types.js";
 import { flattenRoot, openRepo } from "./core/repo.js";
 
@@ -44,7 +44,7 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
         if (w.prevId !== null) await checkObject(w.prevId, 3);
         if (w.publicationId !== null) {
           const pb = await checkObject(w.publicationId, 7);
-          if (pb !== null) checkPublicationBody(pb, w, id, issues);
+          if (pb !== null) await checkPublicationBody(pb, w, id, checkObject, issues);
         }
         for (const c of w.contextIds) await checkObject(c, 6);
         if (full) await checkTree(repo, w.rootId, issues);
@@ -62,10 +62,10 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
         if (cp.layerId !== layer.id) issues.push({ kind: "layer-mismatch", detail: layer.id });
         await checkObject(cp.anchorId, 3);
         await checkObject(cp.rootId, 2);
-        if (cp.prevId !== null) await checkObject(cp.prevId, 4);
+        const prevCpBytes = cp.prevId !== null ? await checkObject(cp.prevId, 4) : null;
         if (cp.recordId !== null) {
           const rb = await checkObject(cp.recordId);
-          if (rb !== null) checkRecordBody(rb, layer.id, cp, issues);
+          if (rb !== null) await checkRecordBody(rb, layer.id, cp, prevCpBytes, issues);
         }
         for (const c of cp.contextIds) await checkObject(c, 6);
         if (full) await checkTree(repo, cp.rootId, issues);
@@ -96,30 +96,36 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
   return { worlds: Object.keys(refs.worldsBySeq).length, layers: Object.values(refs.layers).filter((l) => l.state !== "deleted").length, objects, issues };
 }
 
-function checkPublicationBody(
+async function checkPublicationBody(
   raw: Uint8Array,
-  w: { rootId: string; seq: number; contextIds: ReadonlyArray<string> },
+  w: { rootId: string; seq: number; prevId: string | null; contextIds: ReadonlyArray<string> },
   worldId: string,
+  checkObject: (id: string, expected?: number) => Promise<Uint8Array | null>,
   issues: Array<VerifyIssue>
-): void {
+): Promise<void> {
   try {
     const p = decodePublication(raw);
     if (p.rootId !== w.rootId) issues.push({ kind: "publication-root-mismatch", detail: worldId });
     if (p.seq !== w.seq) issues.push({ kind: "publication-seq-mismatch", detail: worldId });
+    if (p.priorId !== w.prevId) {
+      issues.push({ kind: "publication-prior-mismatch", detail: `${worldId}: publication-prior-mismatch` });
+    }
     if (JSON.stringify([...p.contextIds].sort()) !== JSON.stringify([...w.contextIds].sort())) {
       issues.push({ kind: "publication-context-mismatch", detail: worldId });
     }
+    await checkObject(p.checkpointId, 4);
   } catch (e) {
     issues.push({ kind: "bad-publication", detail: `${worldId}: ${e instanceof Error ? e.message : String(e)}` });
   }
 }
 
-function checkRecordBody(
+async function checkRecordBody(
   raw: Uint8Array,
   layerId: string,
   cp: { rootId: string; anchorId: string; prevId: string | null },
+  prevCheckpointBytes: Uint8Array | null,
   issues: Array<VerifyIssue>
-): void {
+): Promise<void> {
   try {
     const { type } = unwrapObject(raw);
     if (type === 8) {
@@ -128,6 +134,8 @@ function checkRecordBody(
       if (r.rootId !== cp.rootId) issues.push({ kind: "refresh-root-mismatch", detail: layerId });
       if (cp.prevId === null || r.prevCheckpointId !== cp.prevId) {
         issues.push({ kind: "refresh-prev-mismatch", detail: layerId });
+      } else if (prevCheckpointBytes !== null && decodeCheckpoint(prevCheckpointBytes).anchorId !== r.prevAnchorId) {
+        issues.push({ kind: "refresh-anchor-mismatch", detail: `${layerId}: refresh-anchor-mismatch` });
       }
     } else if (type === 9) {
       const s = decodeStack(raw);
@@ -197,7 +205,7 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
     queue.push({ id: l.checkpoint, type: 4 });
     for (const mid of Object.values(l.sessions)) queue.push({ id: mid, type: 6 });
   }
-  for (const entry of await listJournals(repo.metaDir)) {
+  for (const entry of await pruneJournals(repo.metaDir, dryRun)) {
     if (entry.state === "finalized" || entry.state === "accepted" || entry.state === "conflict") continue;
     collectJournalRoots(entry, queue);
   }
@@ -265,8 +273,8 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
   const all = await listObjects(repo);
   const unreach = all.filter((id) => !reachable.has(id));
   const quarantine = new Set<string>();
+  const cutoff = Date.now() - 5_000;
   try {
-    const cutoff = Date.now() - 5_000;
     const { statSync } = await import("node:fs");
     for (const id of unreach) {
       try {
@@ -279,6 +287,7 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
   } catch {
     // stat unavailable; no quarantine
   }
+  const staleTmp = await findStaleTmp(repo.metaDir, cutoff);
   const eligible = unreach.filter((id) => !quarantine.has(id));
   let removed = 0;
   if (!dryRun) {
@@ -286,6 +295,7 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
       await rm(join(repo.metaDir, "objects", id.slice(0, 2), id.slice(2)), { force: true });
       removed++;
     }
+    for (const path of staleTmp) await rm(path, { force: true });
   } else {
     removed = eligible.length;
   }
@@ -301,6 +311,60 @@ function collectJournalRoots(entry: { payload: unknown }, queue: Array<{ id: str
   };
   walk(entry.payload);
   for (const id of ids) queue.push({ id });
+}
+
+const TMP_LEAF_PATTERN = /\.tmp-\d+-\d+$/;
+
+// writeJsonAtomic leaks `<name>.tmp-<pid>-<ts>` next to the target and the
+// object store spills `obj-*` into <meta>/tmp on crash; sweep both with the
+// same grace period as quarantine.
+async function findStaleTmp(metaDir: string, cutoff: number): Promise<ReadonlyArray<string>> {
+  const out: Array<string> = [];
+  const sweep: ReadonlyArray<{ dir: string; match: (name: string) => boolean }> = [
+    { dir: metaDir, match: (name) => TMP_LEAF_PATTERN.test(name) },
+    { dir: join(metaDir, "tmp"), match: (name) => name.startsWith("obj-") }
+  ];
+  for (const { dir, match } of sweep) {
+    let names: ReadonlyArray<string>;
+    try {
+      names = await readdir(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!match(name)) continue;
+      const full = join(dir, name);
+      try {
+        const st = await stat(full);
+        if (st.isFile() && st.mtimeMs < cutoff) out.push(full);
+      } catch {
+        // racing writer owns it; leave it alone
+      }
+    }
+  }
+  return out;
+}
+
+// Recovery anchors (prepared, objects_durable, world_created, stale-retry)
+// are never pruned; settled journals are dropped only past the retention
+// window and outside the newest KEEP entries.
+const JOURNAL_PRUNE_STATES = new Set(["finalized", "accepted", "conflict"]);
+const JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const JOURNAL_KEEP = 100;
+
+async function pruneJournals(metaDir: string, dryRun: boolean): Promise<ReadonlyArray<JournalEntry>> {
+  const all = await listJournals(metaDir);
+  const newestFirst = all
+    .filter((j) => JOURNAL_PRUNE_STATES.has(j.state))
+    .sort((a, b) => (a.updatedAt === b.updatedAt ? (a.operationId < b.operationId ? -1 : 1) : a.updatedAt < b.updatedAt ? 1 : -1));
+  const cutoff = Date.now() - JOURNAL_RETENTION_MS;
+  const doomed = newestFirst.filter((j, i) => i >= JOURNAL_KEEP && Date.parse(j.updatedAt) < cutoff);
+  if (!dryRun) {
+    for (const j of doomed) await rm(join(metaDir, "journal", `${j.operationId}.json`), { force: true });
+  }
+  if (doomed.length === 0) return all;
+  const doomedIds = new Set(doomed.map((j) => j.operationId));
+  return all.filter((j) => !doomedIds.has(j.operationId));
 }
 
 async function listObjects(repo: { metaDir: string }): Promise<ReadonlyArray<string>> {
