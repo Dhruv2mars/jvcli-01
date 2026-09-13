@@ -53,10 +53,12 @@ async function adoptJournalCheckpoint(repo: Repo, layerId: string, checkpoint: s
   const ref = refs.layers[layerId];
   if (ref === undefined) throw fail(CODES.layerNotFound, "no such layer", { layerId });
   if (ref.checkpoint === checkpoint) return checkpoint;
+  if (ref.state !== "active") throw fail(CODES.busy, "layer changed during publish; retry", { layerId, retryable: true });
   const next = structuredClone(refs);
   next.layers[layerId] = { ...ref, checkpoint };
-  const { saveRefs } = await import("./core/refs.js");
-  await saveRefs(repo.metaDir, next);
+  const { casRefs } = await import("./core/refs.js");
+  const swapped = await casRefs(repo.metaDir, refs, next);
+  if (!swapped) throw fail(CODES.busy, "layer changed during publish; retry", { layerId, retryable: true });
   await materializeFromRoot(repo, layerWorkspaceDir(repo, layerId), cp.rootId, layerId);
   return checkpoint;
 }
