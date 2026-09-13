@@ -141,12 +141,8 @@ export async function listJournals(metaDir: string): Promise<ReadonlyArray<Journ
   }
   const out: Array<JournalEntry> = [];
   for (const f of files) {
-    try {
-      const raw = await readFile(join(dir, f), "utf8");
-      out.push(JSON.parse(raw) as JournalEntry);
-    } catch {
-      // unreadable journal entry pins GC conservatively via the caller
-    }
+    const raw = await readFile(join(dir, f), "utf8");
+    out.push(JSON.parse(raw) as JournalEntry);
   }
   return out;
 }

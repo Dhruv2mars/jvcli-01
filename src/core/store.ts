@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { decodeTop, encodeCbor, objectId, unwrapObject } from "./cbor.js";
 import { CODES, fail } from "./types.js";
@@ -44,19 +44,20 @@ export class ObjectStore {
     const id = objectId(bytes);
     const final = this.pathFor(id);
     try {
-      await readFile(final);
       const existing = await readFile(final);
       if (Buffer.compare(Buffer.from(existing), Buffer.from(bytes)) !== 0) {
         throw fail(CODES.corruptObject, `object collision ${id}`);
       }
+      await utimes(final, new Date(), new Date()).catch(() => {});
       return id;
     } catch (e) {
-      if (e instanceof Error && (e as { code?: string }).code !== "ENOENT" && !(e instanceof Object.getPrototypeOf(fail("x", "y")).constructor)) {
-        // fallthrough check below handles JvError; ENOENT means write it
-      }
       if (e !== undefined && typeof e === "object" && "code" in (e as object)) {
         const c = (e as { code?: string }).code;
         if (c !== undefined && c !== "ENOENT" && c.startsWith("E_")) throw e;
+      }
+      if ((e as { code?: string }).code !== "ENOENT") {
+        // read or utimes failed for a non-JvError reason; fall through to
+        // the atomic write path, whose existence check decides the outcome
       }
     }
     const tmp = join(this.dir, "..", "tmp", `obj-${id}-${process.pid}-${Date.now()}`);
