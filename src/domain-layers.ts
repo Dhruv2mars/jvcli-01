@@ -14,7 +14,7 @@ import {
 import { hashTree, hydrate, readFlat, TreeStager } from "./core/tree-stage.js";
 import { normalizePath } from "./core/paths.js";
 import { appendJournal, loadRefs, readJournal, resolveLayerRef, saveRefs, updateJournal, type LayerRef } from "./core/refs.js";
-import { clearWorkspace, materializeTree, scanDirectory } from "./core/scan.js";
+import { clearWorkspace, materializeTree, removeLayerMarker, scanDirectory, writeLayerMarker } from "./core/scan.js";
 import { CODES, fail, type LayerState } from "./core/types.js";
 import { currentWorldId, flattenRoot, layerWorkspaceDir, openRepo, resolveWorldSelector, type Repo } from "./core/repo.js";
 
@@ -155,16 +155,17 @@ export async function createLayer(repo: Repo, opts: CreateLayerOptions): Promise
   const next = structuredClone(refs);
   next.layers[id] = ref;
   await saveRefs(repo.metaDir, next);
-  await materializeFromRoot(repo, ws, rootId);
+  await materializeFromRoot(repo, ws, rootId, id);
   return { ref, workspace: ws };
 }
 
-export async function materializeFromRoot(repo: Repo, ws: string, rootId: string): Promise<void> {
+export async function materializeFromRoot(repo: Repo, ws: string, rootId: string, layerId?: string): Promise<void> {
   const flat = await readFlat(repo.store, rootId);
   const files = await hydrate(repo.store, flat);
   await mkdir(ws, { recursive: true });
   await clearWorkspace(ws);
   await materializeTree(ws, files, flat.symlinks);
+  if (layerId !== undefined) await writeLayerMarker(ws, layerId);
 }
 
 export async function openLayer(repo: Repo, selector: string): Promise<{ ref: LayerRef; workspace: string }> {
@@ -178,10 +179,11 @@ export async function openLayer(repo: Repo, selector: string): Promise<{ ref: La
     const next = structuredClone(refs);
     next.layers[ref.id] = { ...ref, state: "active", workspace: ws };
     await saveRefs(repo.metaDir, next);
-    await materializeFromRoot(repo, ws, decodeCheckpoint(await repo.store.readChecked(ref.checkpoint, 4)).rootId);
+    await materializeFromRoot(repo, ws, decodeCheckpoint(await repo.store.readChecked(ref.checkpoint, 4)).rootId, ref.id);
     return { ref: { ...ref, state: "active", workspace: ws }, workspace: ws };
   }
   await mkdir(ws, { recursive: true });
+  await writeLayerMarker(ws, ref.id);
   return { ref, workspace: ws };
 }
 
@@ -193,6 +195,7 @@ export async function closeLayer(repo: Repo, selector: string): Promise<LayerRef
   const next = structuredClone(refs);
   next.layers[ref.id] = { ...ref, state: "closed", workspace: null };
   await saveRefs(repo.metaDir, next);
+  if (ref.workspace !== null) await removeLayerMarker(ref.workspace);
   return next.layers[ref.id]!;
 }
 
@@ -296,7 +299,7 @@ export async function cloneLayer(repo: Repo, selector: string, name?: string, ch
   const next = structuredClone(refs);
   next.layers[id] = ref;
   await saveRefs(repo.metaDir, next);
-  await materializeFromRoot(repo, ws, cp.rootId);
+  await materializeFromRoot(repo, ws, cp.rootId, id);
   return { ref, workspace: ws };
 }
 
@@ -421,7 +424,7 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
   nl.layers[ref.id] = { ...live, checkpoint: freshId };
   await saveRefs(repo.metaDir, nl);
   await updateJournal(repo.metaDir, opId, { state: "finalized" });
-  await materializeFromRoot(repo, layerWorkspaceDir(repo, ref.id), rootId);
+  await materializeFromRoot(repo, layerWorkspaceDir(repo, ref.id), rootId, ref.id);
   return { checkpoint: freshId, adopted: cur.seq, conflicts: [] };
 }
 

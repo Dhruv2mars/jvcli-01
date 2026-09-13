@@ -35,7 +35,7 @@ export async function scanDirectory(root: string): Promise<ScanResult> {
     for (const entry of entries) {
       const abs = join(dir, entry.name);
       const rel = relative(root, abs).split(sep).join("/");
-      if (rel === JV_DIR || rel.startsWith(`${JV_DIR}/`) || rel === IGNORE_FILE) continue;
+      if (rel === JV_DIR || rel.startsWith(`${JV_DIR}/`) || rel === IGNORE_FILE || rel === LAYER_MARKER) continue;
       const isDir = entry.isDirectory();
       if (ignoreMatch(rules, rel, isDir)) continue;
       if (entry.isSymbolicLink()) {
@@ -67,6 +67,8 @@ export async function scanDirectory(root: string): Promise<ScanResult> {
   return { files, symlinks, warnings, rules };
 }
 
+export const LAYER_MARKER = ".jvcli-layer";
+
 export async function materializeTree(
   root: string,
   files: ReadonlyMap<string, { bytes: Uint8Array; executable: boolean }>,
@@ -92,7 +94,16 @@ export async function materializeTree(
 export async function clearWorkspace(root: string): Promise<void> {
   const entries = await readdir(root, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === JV_DIR) continue;
+    if (entry.name === JV_DIR || entry.name === LAYER_MARKER) continue;
     await rm(join(root, entry.name), { recursive: true, force: true });
   }
+}
+
+export async function writeLayerMarker(workspace: string, layerId: string): Promise<void> {
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, LAYER_MARKER), `${layerId}\n`);
+}
+
+export async function removeLayerMarker(workspace: string): Promise<void> {
+  await rm(join(workspace, LAYER_MARKER), { force: true });
 }

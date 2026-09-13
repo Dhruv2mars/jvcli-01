@@ -284,7 +284,7 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   const ok = await casRefs(repo.metaDir, snapshot, next);
   if (!ok) throw fail(CODES.busy, "concurrent stack; retry", { operationId: opId, retryable: true });
   await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId } });
-  await materializeFromRoot(repo, ws, builtRoot);
+  await materializeFromRoot(repo, ws, builtRoot, destId);
   return { destId, workspace: ws, operationId: opId, order };
 }
 

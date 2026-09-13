@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CODES, fail } from "./core/types.js";
@@ -22,7 +22,8 @@ export async function findLayerForCwd(cwd: string): Promise<string> {
   while (true) {
     const marker = join(cur, ".jvcli-layer");
     try {
-      const raw = await readFile(marker, "utf8");
+      const [raw, st] = await Promise.all([readFile(marker, "utf8"), stat(marker)]);
+      if (!st.isFile()) continue;
       const id = raw.trim().toLowerCase();
       if (/^[0-9a-f]{32}$/.test(id)) return id;
     } catch {
