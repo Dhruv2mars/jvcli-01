@@ -9,15 +9,19 @@ const flat = (files: Record<string, string>, symlinks: Record<string, string> = 
 });
 const empty: Flat = flat({});
 
-let seed = 0x12345678;
-const rand = (): number => {
-  seed = (seed * 1664525 + 1013904223) >>> 0;
-  return seed / 0x100000000;
-};
-const randBlob = (): string => B(Math.floor(rand() * 256));
+function makeRand(seedInit: number): () => number {
+  let seed = seedInit >>> 0;
+  return () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+}
+const randBlobWith = (rand: () => number): string => B(Math.floor(rand() * 256));
 const PATHS = ["a.txt", "b.txt", "c.txt", "d/e.txt", "d/f.txt", "g.txt"];
 
-function randomFlat(base: Flat, Touch: () => string): Flat {
+const snap = (v: Flat): string => JSON.stringify({ f: [...v.files].sort(), s: [...v.symlinks].sort() });
+
+function randomFlat(rand: () => number, base: Flat, Touch: () => string): Flat {
   const files = new Map(base.files);
   const symlinks = new Map(base.symlinks);
   const n = Math.floor(rand() * 3);
@@ -60,9 +64,11 @@ function applyChanges(base: Flat, changes: ReturnType<typeof diffTrees>, side: F
 
 describe("merge reference model", () => {
   test("diff replay: merge of base plus derived changes reproduces the side", () => {
+    const rand = makeRand(0x1a2b3c01);
+    const blob = () => randBlobWith(rand);
     for (let i = 0; i < 200; i++) {
-      const base = randomFlat(empty, randBlob);
-      const side = randomFlat(base, randBlob);
+      const base = randomFlat(rand, empty, blob);
+      const side = randomFlat(rand, base, blob);
       const v = structuralCompatible(base, base, side);
       expect(v.ok).toBe(true);
       if (!v.ok) continue;
@@ -72,10 +78,12 @@ describe("merge reference model", () => {
   });
 
   test("compatible merge equals either application order", () => {
+    const rand = makeRand(0x1a2b3c02);
+    const blob = () => randBlobWith(rand);
     for (let i = 0; i < 200; i++) {
-      const base = randomFlat(empty, randBlob);
-      const left = randomFlat(base, randBlob);
-      const right = randomFlat(base, randBlob);
+      const base = randomFlat(rand, empty, blob);
+      const left = randomFlat(rand, base, blob);
+      const right = randomFlat(rand, base, blob);
       const v = structuralCompatible(base, left, right);
       if (!v.ok) continue;
       const lr = applyChanges(applyChanges(base, diffTrees(base, left), left), diffTrees(base, right), right);
@@ -88,10 +96,12 @@ describe("merge reference model", () => {
   });
 
   test("merge is symmetric: argument order never chooses content", () => {
+    const rand = makeRand(0x1a2b3c03);
+    const blob = () => randBlobWith(rand);
     for (let i = 0; i < 200; i++) {
-      const base = randomFlat(empty, randBlob);
-      const left = randomFlat(base, randBlob);
-      const right = randomFlat(base, randBlob);
+      const base = randomFlat(rand, empty, blob);
+      const left = randomFlat(rand, base, blob);
+      const right = randomFlat(rand, base, blob);
       const a = structuralCompatible(base, left, right);
       const b = structuralCompatible(base, right, left);
       expect(a.ok).toBe(b.ok);
@@ -116,13 +126,11 @@ describe("merge reference model", () => {
     expect(same.ok).toBe(true);
   });
 
-  test("conflict taxonomy: both-write, delete-modify, type-clash", () => {
+  test("conflict taxonomy: both-write, delete-modify, type-clash, ancestor-clash", () => {
     const base = flat({ "f.txt": B(1), "g.txt": B(2), "t.txt": B(3) });
     const both = structuralCompatible(base, flat({ "f.txt": B(7), "g.txt": B(2), "t.txt": B(3) }), flat({ "f.txt": B(8), "g.txt": B(2), "t.txt": B(3) }));
     expect(both.ok).toBe(false);
     if (!both.ok) expect(both.conflicts.find((c) => c.path === "f.txt")?.kind).toBe("both-write");
-    const del = structuralCompatible(base, flat({ "g.txt": B(2), "t.txt": B(3) }), flat({ "f.txt": B(1), "g.txt": B(5), "t.txt": B(3) }));
-    void del;
     const delMod = structuralCompatible(
       flat({ "v.txt": B(1) }),
       flat({}),
@@ -130,23 +138,39 @@ describe("merge reference model", () => {
     );
     expect(delMod.ok).toBe(false);
     if (!delMod.ok) expect(delMod.conflicts[0]?.kind).toBe("delete-modify");
-    const tc = structuralCompatible(flat({}), flat({ "x.txt": B(1) }, { "x.txt": "t" }), flat({ "x.txt": B(2) }));
-    void tc;
     const tc2 = structuralCompatible(flat({ "y.txt": B(1) }), flat({}, { "y.txt": "t" }), flat({ "y.txt": B(2) }));
     expect(tc2.ok).toBe(false);
     if (!tc2.ok) expect(tc2.conflicts[0]?.kind).toBe("type-clash");
+    const anc = structuralCompatible(
+      flat({ "d/e.txt": B(1) }),
+      flat({ "d/e.txt": B(1), "d/f.txt": B(4) }),
+      flat({ "d2/e.txt": B(1) })
+    );
+    void anc;
+    const anc2 = structuralCompatible(
+      flat({ "d": B(0), "d/e.txt": B(1) }),
+      flat({ "d/e.txt": B(1), "d/f.txt": B(4) }),
+      flat({ "d/e.txt": B(2) })
+    );
+    expect(anc2.ok).toBe(false);
+    if (!anc2.ok) expect(anc2.conflicts.some((c) => c.kind === "ancestor-clash" || c.kind === "type-clash")).toBe(true);
   });
 
-  test("failed merge leaves inputs untouched; success exposes the union", () => {
-    const base = flat({ "f.txt": B(1) });
-    const left = flat({ "f.txt": B(2) });
-    const right = flat({ "f.txt": B(3) });
-    const before = JSON.stringify({ l: [...left.files], r: [...right.files] });
+  test("failed merge leaves all inputs untouched; success exposes the union", () => {
+    const base = flat({ "f.txt": B(1) }, { "s": "t" });
+    const left = flat({ "f.txt": B(2) }, { "s": "t" });
+    const right = flat({ "f.txt": B(3) }, { "s": "t" });
+    const before = JSON.stringify({ b: snap(base), l: snap(left), r: snap(right) });
     const v = structuralCompatible(base, left, right);
     expect(v.ok).toBe(false);
-    expect(JSON.stringify({ l: [...left.files], r: [...right.files] })).toBe(before);
-    const ok = structuralCompatible(base, flat({ "f.txt": B(1), "a.txt": B(4) }), flat({ "f.txt": B(1), "b.txt": B(5) }));
+    expect(JSON.stringify({ b: snap(base), l: snap(left), r: snap(right) })).toBe(before);
+    const okBase = flat({ "f.txt": B(1) });
+    const okLeft = flat({ "f.txt": B(1), "a.txt": B(4) });
+    const okRight = flat({ "f.txt": B(1), "b.txt": B(5) });
+    const okBefore = JSON.stringify({ b: snap(okBase), l: snap(okLeft), r: snap(okRight) });
+    const ok = structuralCompatible(okBase, okLeft, okRight);
     expect(ok.ok).toBe(true);
+    expect(JSON.stringify({ b: snap(okBase), l: snap(okLeft), r: snap(okRight) })).toBe(okBefore);
     if (ok.ok) {
       expect(ok.merged.files.get("a.txt")).toBe(B(4));
       expect(ok.merged.files.get("b.txt")).toBe(B(5));
