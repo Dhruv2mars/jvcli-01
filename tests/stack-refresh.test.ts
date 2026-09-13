@@ -189,6 +189,11 @@ describe("stack operation-id resume", () => {
       expect(second.json.dest).toBe(dest);
       const list = runCliJson(repo, ["layer", "list"]);
       expect((list.json.layers as Array<any>).filter((l) => l.name === "combo")).toHaveLength(1);
+      const c = createLayer(repo, "RC");
+      writeWs(repo, c.id, "cc.txt", "from-c\n");
+      const mismatch = runCliJson(repo, ["stack", a.id, c.id, "--into", "combo", "--operation-id", op]);
+      expect(mismatch.code).not.toBe(0);
+      expect(mismatch.json.error.code).toBe("E_IO");
     } finally {
       rmTemp(t.base);
     }

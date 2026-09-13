@@ -144,20 +144,28 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
     });
   }
   const anchorRoot = decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId;
-  const [anchorFlat, priorFlat, layerFlat, anchorExec, layerExec] = await Promise.all([
+  const [anchorFlat, priorFlat, layerFlat, anchorExec, priorExec, layerExec] = await Promise.all([
     flattenRoot(repo.store, anchorRoot),
     flattenRoot(repo.store, prior.rootId),
     flattenRoot(repo.store, cp.rootId),
     readFlat(repo.store, anchorRoot),
+    readFlat(repo.store, prior.rootId),
     readFlat(repo.store, cp.rootId)
   ]);
+  const toExecView = (blobs: { files: Map<string, string>; symlinks: Map<string, string> }, exec: { files: ReadonlyMap<string, { blobId: string; executable: boolean }> }): { files: Map<string, { blob: string; executable: boolean }>; symlinks: Map<string, string> } => ({
+    files: new Map([...blobs.files].map(([p, b]) => [p, { blob: b, executable: exec.files.get(p)?.executable ?? false }] as const)),
+    symlinks: blobs.symlinks
+  });
+  const anchorView = toExecView(anchorFlat, anchorExec);
+  const priorView = toExecView(priorFlat, priorExec);
+  const layerView = toExecView(layerFlat, layerExec);
   const execOf = (path: string): boolean => {
     const anchorBlob = anchorFlat.files.get(path) ?? null;
     const layerBlob = layerFlat.files.get(path) ?? null;
     if (layerBlob !== null && layerBlob !== anchorBlob) return layerExec.files.get(path)?.executable ?? false;
     return anchorExec.files.get(path)?.executable ?? layerExec.files.get(path)?.executable ?? false;
   };
-  const verdict = structuralCompatible(anchorFlat, priorFlat, layerFlat);
+  const verdict = structuralCompatible(anchorView, priorView, layerView);
   if (!verdict.ok) {
     await updateJournal(repo.metaDir, operationId, { state: "conflict", payload: { conflicts: verdict.conflicts } });
     return { seq: prior.seq, worldId: priorId, status: "conflict", conflicts: verdict.conflicts, operationId };
@@ -250,17 +258,24 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   if (selectors.length < 2) throw fail(CODES.invalidPath, "stack needs at least two layers");
   const opId = (operationId ?? newId16()).toLowerCase();
   const stacked = await readJournal(repo.metaDir, opId);
+  const refs0 = await loadRefs(repo.metaDir);
+  const sources = selectors.map((s) => resolveLayerRef(refs0, s));
   if (stacked !== null) {
     if (stacked.kind !== "stack") throw fail(CODES.io, "operation id belongs to another op", { operationId: opId });
     if (stacked.state === "finalized") {
-      const destId = (stacked.payload as { dest: string }).dest;
-      const destRef = (await loadRefs(repo.metaDir)).layers[destId];
-      if (destRef === undefined) throw fail(CODES.corruptObject, `stack destination missing: ${destId}`, { operationId: opId });
-      return { destId, workspace: destRef.workspace ?? layerWorkspaceDir(repo, destId), operationId: opId, order: (stacked.payload as { order?: ReadonlyArray<string> }).order ?? [] };
+      const prior = stacked.payload as { dest: string; sources?: ReadonlyArray<string>; into?: string | null; order?: ReadonlyArray<string> };
+      const sameSources = prior.sources !== undefined
+        && prior.sources.length === sources.length
+        && sources.every((s) => prior.sources!.includes(s.id));
+      const sameInto = (prior.into ?? null) === (name ?? null);
+      if (!sameSources || !sameInto) {
+        throw fail(CODES.io, `operation id ${opId} belongs to a different stack`, { operationId: opId });
+      }
+      const destRef = (await loadRefs(repo.metaDir)).layers[prior.dest];
+      if (destRef === undefined) throw fail(CODES.corruptObject, `stack destination missing: ${prior.dest}`, { operationId: opId });
+      return { destId: prior.dest, workspace: destRef.workspace ?? layerWorkspaceDir(repo, prior.dest), operationId: opId, order: prior.order ?? [] };
     }
   }
-  const refs0 = await loadRefs(repo.metaDir);
-  const sources = selectors.map((s) => resolveLayerRef(refs0, s));
   for (const s of sources) {
     if (s.state !== "active") throw fail(CODES.layerState, `layer ${s.id} is ${s.state}`, { layerId: s.id });
   }
@@ -277,6 +292,11 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   const curFlat = await flattenRoot(repo.store, curW.rootId);
   const curExec = await readFlat(repo.store, curW.rootId);
   const contribs: Array<{ layerId: string; cpId: string; anchorId: string; flat: { files: Map<string, string>; symlinks: Map<string, string> }; exec: Map<string, boolean> }> = [];
+  const toExecView = (blobs: { files: Map<string, string>; symlinks: Map<string, string> }, exec: { files: ReadonlyMap<string, { blobId: string; executable: boolean }> }): { files: Map<string, { blob: string; executable: boolean }>; symlinks: Map<string, string> } => ({
+    files: new Map([...blobs.files].map(([p, b]) => [p, { blob: b, executable: exec.files.get(p)?.executable ?? false }] as const)),
+    symlinks: blobs.symlinks
+  });
+  const curView = toExecView(curFlat, curExec);
   for (let i = 0; i < live.length; i++) {
     const cp = decodeCheckpoint(await repo.store.readChecked(cpIds[i]!, 4));
     const anchorRoot = decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId;
@@ -286,7 +306,7 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
       readFlat(repo.store, anchorRoot),
       readFlat(repo.store, cp.rootId)
     ]);
-    const norm = structuralCompatible(anchorFlat, curFlat, layerFlat);
+    const norm = structuralCompatible(toExecView(anchorFlat, anchorExecFlat), curView, toExecView(layerFlat, layerExecFlat));
     if (!norm.ok) {
       throw fail(CODES.conflict, `cannot normalize layer ${live[i]!.id} onto current world`, {
         layerId: live[i]!.id,
@@ -305,10 +325,15 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   }
   const order = orderSources(contribs.map((c) => ({ layerId: c.layerId, anchorId: c.anchorId, cpId: c.cpId })));
   let acc = { files: new Map(curFlat.files), symlinks: new Map(curFlat.symlinks) };
+  const toContribView = (c: { flat: { files: Map<string, string>; symlinks: Map<string, string> }; exec: Map<string, boolean> }): { files: Map<string, { blob: string; executable: boolean }>; symlinks: Map<string, string> } => ({
+    files: new Map([...c.flat.files].map(([p, b]) => [p, { blob: b, executable: c.exec.get(p) ?? false }] as const)),
+    symlinks: c.flat.symlinks
+  });
   const accExec = new Map<string, boolean>([...curExec.files].map(([path, ref]) => [path, ref.executable] as const));
   for (const lid of order) {
     const c = contribs.find((x) => x.layerId === lid)!;
-    const v = structuralCompatible(curFlat, acc, c.flat);
+    const accView = { files: new Map([...acc.files].map(([p, b]) => [p, { blob: b, executable: accExec.get(p) ?? false }] as const)), symlinks: acc.symlinks };
+    const v = structuralCompatible(curView, accView, toContribView(c));
     if (!v.ok) {
       throw fail(CODES.conflict, "stack conflicts", { operationId: opId, paths: v.conflicts.map((x) => x.path), hint: "resolve in source layers and retry" });
     }
@@ -372,7 +397,7 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   }
   const ok = await casRefs(repo.metaDir, snapshot, next);
   if (!ok) throw fail(CODES.busy, "concurrent stack; retry", { operationId: opId, retryable: true });
-  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId, order } });
+  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId, order, sources: live.map((s) => s.id), into: name ?? null } });
   await materializeFromRoot(repo, ws, builtRoot, destId);
   return { destId, workspace: ws, operationId: opId, order };
 }

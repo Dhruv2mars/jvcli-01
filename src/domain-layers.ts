@@ -418,8 +418,6 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
   const ref = resolveLayerRef(refs, selector);
   if (ref.state !== "active") throw fail(CODES.layerState, `layer is ${ref.state}`, { layerId: ref.id });
   const cpId = await flushLayer(repo, ref.id);
-  const after = await loadRefs(repo.metaDir);
-  const live = after.layers[ref.id]!;
   const cp = decodeCheckpoint(await repo.store.readChecked(cpId, 4));
   const cur = await currentSeqOf(repo);
   if (cp.anchorId === cur.id) return { checkpoint: cpId, adopted: cur.seq, conflicts: [] };
@@ -455,7 +453,11 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
     if (curBlob !== null && curBlob !== anchorBlob) return curBit ?? false;
     return layerBit ?? curBit ?? anchor ?? false;
   };
-  const verdict = structuralCompatible(anchorFlat, curFlat, layerFlat);
+  const toExecView = (blobs: { files: Map<string, string>; symlinks: Map<string, string> }, exec: { files: ReadonlyMap<string, { blobId: string; executable: boolean }> }): { files: Map<string, { blob: string; executable: boolean }>; symlinks: Map<string, string> } => ({
+    files: new Map([...blobs.files].map(([p, b]) => [p, { blob: b, executable: exec.files.get(p)?.executable ?? false }] as const)),
+    symlinks: blobs.symlinks
+  });
+  const verdict = structuralCompatible(toExecView(anchorFlat, anchorExec), toExecView(curFlat, curExec), toExecView(layerFlat, layerExec));
   if (!verdict.ok) {
     await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { conflicts: verdict.conflicts } });
     return { checkpoint: cpId, adopted: cur.seq, conflicts: verdict.conflicts };
@@ -483,8 +485,12 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
   });
   const freshId = await repo.store.put(fresh);
   const latest = await loadRefs(repo.metaDir);
+  const latestRef = latest.layers[ref.id];
+  if (latestRef === undefined || latestRef.checkpoint !== cpId || latestRef.state !== "active") {
+    throw fail(CODES.busy, "layer changed during refresh; retry", { layerId: ref.id, operationId: opId, retryable: true });
+  }
   const nl = structuredClone(latest);
-  nl.layers[ref.id] = { ...live, checkpoint: freshId };
+  nl.layers[ref.id] = { ...latestRef, checkpoint: freshId };
   const swapped = await casRefs(repo.metaDir, latest, nl);
   if (!swapped) {
     throw fail(CODES.busy, "layer changed during refresh; retry", { layerId: ref.id, operationId: opId, retryable: true });

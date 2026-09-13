@@ -109,14 +109,26 @@ function has(args: ReadonlyArray<string>, name: string): boolean {
   return args.includes(name);
 }
 
+let pipeGuarded = false;
+
+function guardPipe(): void {
+  if (pipeGuarded) return;
+  pipeGuarded = true;
+  process.stdout.on("error", (e: Error & { code?: string }) => {
+    if (e.code === "EPIPE") {
+      process.exitCode = 1;
+      process.stdout.destroy();
+    }
+  });
+  process.stderr.on("error", (e: Error & { code?: string }) => {
+    if (e.code === "EPIPE") process.exitCode = 1;
+  });
+}
+
 function emit(o: Output, json: boolean): void {
-  try {
-    if (json) process.stdout.write(`${JSON.stringify(o.json, null, 2)}\n`);
-    else process.stdout.write(o.human.endsWith("\n") ? o.human : `${o.human}\n`);
-  } catch (e) {
-    if ((e as { code?: string }).code === "EPIPE") process.exitCode = 1;
-    else throw e;
-  }
+  guardPipe();
+  if (json) process.stdout.write(`${JSON.stringify(o.json, null, 2)}\n`);
+  else process.stdout.write(o.human.endsWith("\n") ? o.human : `${o.human}\n`);
 }
 
 async function repoRootOrThrow(start: string): Promise<string> {
@@ -264,11 +276,8 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       if (type === 1) {
         const { payload } = unwrapObject(bytes);
         if (payload.tag === "bytes") {
-          try {
-            process.stdout.write(payload.value);
-          } catch {
-            process.exitCode = 1;
-          }
+          guardPipe();
+          process.stdout.write(payload.value);
         }
         return;
       }

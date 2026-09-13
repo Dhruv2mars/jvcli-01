@@ -126,7 +126,7 @@ function checkRecordBody(
       const r = decodeRefresh(raw);
       if (r.layerId !== layerId) issues.push({ kind: "record-layer-mismatch", detail: layerId });
       if (r.rootId !== cp.rootId) issues.push({ kind: "refresh-root-mismatch", detail: layerId });
-      if (r.prevCheckpointId !== (cp.prevId ?? r.prevCheckpointId)) {
+      if (cp.prevId === null || r.prevCheckpointId !== cp.prevId) {
         issues.push({ kind: "refresh-prev-mismatch", detail: layerId });
       }
     } else if (type === 9) {
