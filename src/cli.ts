@@ -308,12 +308,42 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       const refs = await loadRefs(repo.metaDir);
       const curId = await currentWorldId(repo);
       const cur = decodeWorldVersion(await repo.store.readChecked(curId, 3));
+      const { listJournals } = await import("./core/refs.js");
+      const journals = await listJournals(repo.metaDir);
+      const byState: Record<string, number> = {};
+      const liveIds: Array<string> = [];
+      let archived = 0;
+      for (const j of journals) {
+        byState[j.state] = (byState[j.state] ?? 0) + 1;
+        if (j.state === "finalized" || j.state === "conflict") archived++;
+        else liveIds.push(j.operationId);
+      }
+      liveIds.sort();
+      const layerStates: Record<string, number> = {};
+      let staleLayers = 0;
+      for (const l of Object.values(refs.layers)) {
+        layerStates[l.state] = (layerStates[l.state] ?? 0) + 1;
+        if (l.state === "deleted") continue;
+        try {
+          const cp = decodeCheckpoint(await repo.store.readChecked(l.checkpoint, 4));
+          if (cp.anchorId !== curId) staleLayers++;
+        } catch {
+          // unreadable checkpoint surfaces in verify, not here
+        }
+      }
       const bundle = {
         version: 1,
         repo: repo.repoId,
         world: { seq: cur.seq, id: curId },
         layers: Object.keys(refs.layers).length,
+        layerStates,
+        staleLayers,
         worlds: Object.keys(refs.worldsBySeq).length,
+        journals: { total: journals.length, byState, liveOperationIds: liveIds, archived },
+        verify: await verifyRepo(root, false).then(
+          (r) => ({ ok: true as const, worlds: r.worlds, layers: r.layers, objects: r.objects }),
+          (e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) })
+        ),
         platform: process.platform,
         node: process.version
       };
