@@ -100,4 +100,72 @@ describe("stack + refresh + conflict flows", () => {
       rmTemp(t.base);
     }
   });
+
+  test("clone and child capture dirty source writes via pre-flush", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const p = createLayer(repo, "P");
+      writeWs(repo, p.id, "dirty.txt", "dirty-not-checkpointed\n");
+
+      const k = runCliJson(repo, ["layer", "child", p.id, "--name", "K"]);
+      expect(k.code).toBe(0);
+      expect(readFileSync(join(layerWorkspace(repo, k.json.layer as string), "dirty.txt"), "utf8")).toBe(
+        "dirty-not-checkpointed\n"
+      );
+
+      writeWs(repo, p.id, "dirty2.txt", "second-dirty\n");
+      const c = runCliJson(repo, ["layer", "clone", p.id, "--name", "C"]);
+      expect(c.code).toBe(0);
+      expect(readFileSync(join(layerWorkspace(repo, c.json.layer as string), "dirty2.txt"), "utf8")).toBe("second-dirty\n");
+
+      // Explicit checkpoint pin still wins over the flush.
+      const hist = runCliJson(repo, ["history", "--layer", p.id]);
+      expect(hist.code).toBe(0);
+      const firstCp = (hist.json.checkpoints as Array<any>)[0].id as string;
+      const pinned = runCliJson(repo, ["layer", "clone", p.id, "--name", "PIN", "--checkpoint", firstCp]);
+      expect(pinned.code).toBe(0);
+      expect(() =>
+        readFileSync(join(layerWorkspace(repo, pinned.json.layer as string), "dirty.txt"), "utf8")
+      ).toThrow();
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+});
+
+describe("workspace autodetect via .jvcli-layer marker", () => {
+  test("status and publish resolve the layer from cwd without --layer", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const p = createLayer(repo, "AUTO");
+      const ws = layerWorkspace(repo, p.id);
+      expect(readFileSync(join(ws, ".jvcli-layer"), "utf8").trim()).toBe(p.id);
+      const st = runCliJson(ws, ["status"]);
+      expect(st.code).toBe(0);
+      expect(st.json.layer.id).toBe(p.id);
+      writeWs(repo, p.id, "auto.txt", "from-workspace\n");
+      const pub = runCliJson(ws, ["publish"]);
+      expect(pub.code).toBe(0);
+      expect(pub.json.seq).toBe(2);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("close removes the marker and open restores it", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const p = createLayer(repo, "MARK");
+      const ws = layerWorkspace(repo, p.id);
+      expect(runCliJson(repo, ["layer", "close", p.id]).code).toBe(0);
+      expect(() => readFileSync(join(ws, ".jvcli-layer"), "utf8")).toThrow();
+      expect(runCliJson(repo, ["layer", "open", p.id]).code).toBe(0);
+      expect(readFileSync(join(ws, ".jvcli-layer"), "utf8").trim()).toBe(p.id);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
 });
