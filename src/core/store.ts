@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { decodeTop, encodeCbor, objectId, unwrapObject } from "./cbor.js";
 import { CODES, fail } from "./types.js";
@@ -63,7 +63,7 @@ export class ObjectStore {
     await mkdir(dirname(tmp), { recursive: true });
     await mkdir(dirname(final), { recursive: true });
     await writeFile(tmp, bytes);
-    const fh = await import("node:fs/promises").then((m) => m.open(tmp, "r"));
+    const fh = await open(tmp, "r");
     try {
       await fh.sync();
     } finally {

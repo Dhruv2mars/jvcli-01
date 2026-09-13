@@ -1,7 +1,7 @@
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { decodeCheckpoint, decodeWorldVersion, flattenTree } from "./objects.js";
-import { decodeTree, encodeTree } from "./cbor.js";
+import { decodeTree } from "./cbor.js";
+import { decodeCheckpoint, decodeWorldVersion } from "./objects.js";
 import { LAYERS_DIR, STORE_DIR } from "./paths.js";
 import { loadRefs } from "./refs.js";
 import { ObjectStore } from "./store.js";
@@ -117,5 +117,3 @@ export async function resolveWorldSelector(repo: Repo, selector: string): Promis
   throw fail(CODES.invalidPath, `no such world version: ${selector}`);
 }
 
-export { encodeTree, flattenTree };
-export type { Refs } from "./refs.js";

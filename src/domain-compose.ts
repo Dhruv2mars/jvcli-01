@@ -1,22 +1,24 @@
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { encodeBlob, encodeTree, objectId, unwrapObject } from "./core/cbor.js";
 import { newId16 } from "./core/ids.js";
 import {
+  buildTreeFromFiles,
   decodeCheckpoint,
   decodeWorldVersion,
   encodePublication,
   encodeStack,
+  encodeWorldVersion,
   encodeCheckpoint as encodeCheckpointObj,
   structuralCompatible
 } from "./core/objects.js";
-import { decodeTree } from "./core/cbor.js";
-import { appendJournal, loadRefs, readJournal, resolveLayerRef, saveRefs, updateJournal } from "./core/refs.js";
+import { appendJournal, casRefs, loadRefs, readJournal, resolveLayerRef, updateJournal } from "./core/refs.js";
 import { CODES, fail, type LayerState } from "./core/types.js";
-import { buildTreeFromFiles } from "./core/objects.js";
 import { collectLayerContexts, layerContextStatus } from "./domain-context.js";
 import { flushLayer, materializeFromRoot } from "./domain-layers.js";
 import { layerWorkspaceDir } from "./core/repo.js";
-import { currentWorldId, flattenRoot, openRepo, type Repo } from "./core/repo.js";
+import { currentWorldId, flattenRoot, type Repo } from "./core/repo.js";
+import { clearWorkspace, materializeTree } from "./core/scan.js";
+import { hydrate, readFlat, stageFiles, TreeStager } from "./core/tree-stage.js";
 
 export interface PublishOptions {
   readonly allowMissingContext: boolean;
@@ -32,45 +34,12 @@ export interface PublishResult {
   readonly operationId: string;
 }
 
-async function executableMap(repo: Repo, rootId: string): Promise<Map<string, boolean>> {
-  const out = new Map<string, boolean>();
-  const visit = async (id: string, prefix: string): Promise<void> => {
-    const bytes = await repo.store.readChecked(id, 2);
-    const entries = decodeTree(bytes);
-    for (const e of entries) {
-      const p = prefix === "" ? e.name : `${prefix}/${e.name}`;
-      if (e.kind === "file") out.set(p, e.executable);
-      else if (e.kind === "dir") await visit(e.target, p);
-    }
-  };
-  await visit(rootId, "");
-  return out;
-}
-
-async function materializeMerged(repo: Repo, ws: string, merged: { files: Map<string, string>; symlinks: Map<string, string> }): Promise<string> {
+async function materializeMerged(repo: Repo, ws: string, merged: { files: Map<string, string>; symlinks: Map<string, string> }, exec: ReadonlyMap<string, boolean>): Promise<string> {
   const files = new Map<string, { bytes: Uint8Array; executable: boolean }>();
-  for (const [p, blob] of merged.files) {
-    const raw = await repo.store.readChecked(blob, 1);
-    const { payload } = unwrapObject(raw);
-    if (payload.tag !== "bytes") throw fail(CODES.corruptObject, "bad blob");
-    files.set(p, { bytes: payload.value, executable: false });
-  }
-  const pending = new Map<string, Uint8Array>();
-  const pb = (content: Uint8Array): string => {
-    const bytes = encodeBlob(content);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const pt = (entries: ReadonlyArray<{ name: string; kind: "file" | "dir" | "symlink"; target: string; executable: boolean }>): string => {
-    const bytes = encodeTree(entries);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const { rootId } = buildTreeFromFiles(files, merged.symlinks, { putBlob: pb, putTree: pt });
-  for (const bytes of pending.values()) await repo.store.put(bytes);
-  const { clearWorkspace } = await import("./core/scan.js");
-  const { materializeTree } = await import("./core/scan.js");
-  const { mkdir } = await import("node:fs/promises");
+  const flat = { files: new Map([...merged.files].map(([path, blobId]) => [path, { blobId, executable: exec.get(path) ?? false }] as const)), symlinks: merged.symlinks };
+  const hydrated = await hydrate(repo.store, flat);
+  for (const [path, view] of hydrated) files.set(path, view);
+  const rootId = await stageFiles(repo.store, files, merged.symlinks);
   await mkdir(ws, { recursive: true });
   await clearWorkspace(ws);
   await materializeTree(ws, files, merged.symlinks);
@@ -116,38 +85,28 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
       hint: "jvcli context status --layer <id>"
     });
   }
-  const anchorFlat = await flattenRoot(repo.store, decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId);
-  const priorFlat = await flattenRoot(repo.store, prior.rootId);
-  const layerFlat = await flattenRoot(repo.store, cp.rootId);
+  const anchorRoot = decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId;
+  const [anchorFlat, priorFlat, layerFlat, anchorExec, layerExec] = await Promise.all([
+    flattenRoot(repo.store, anchorRoot),
+    flattenRoot(repo.store, prior.rootId),
+    flattenRoot(repo.store, cp.rootId),
+    readFlat(repo.store, anchorRoot),
+    readFlat(repo.store, cp.rootId)
+  ]);
+  const execOf = (path: string): boolean => {
+    const anchorBlob = anchorFlat.files.get(path) ?? null;
+    const layerBlob = layerFlat.files.get(path) ?? null;
+    if (layerBlob !== null && layerBlob !== anchorBlob) return layerExec.files.get(path)?.executable ?? false;
+    return anchorExec.files.get(path)?.executable ?? layerExec.files.get(path)?.executable ?? false;
+  };
   const verdict = structuralCompatible(anchorFlat, priorFlat, layerFlat);
   if (!verdict.ok) {
     await updateJournal(repo.metaDir, operationId, { state: "conflict", payload: { conflicts: verdict.conflicts } });
     return { seq: prior.seq, worldId: priorId, status: "conflict", conflicts: verdict.conflicts, operationId };
   }
   const merged = verdict.merged;
-  const resultRoot = await materializeMerged(repo, layerWorkspaceDir(repo, ref.id), { files: new Map(merged.files), symlinks: new Map(merged.symlinks) });
-  void resultRoot;
-  const pending = new Map<string, Uint8Array>();
-  const files = new Map<string, { bytes: Uint8Array; executable: boolean }>();
-  for (const [p, blob] of merged.files) {
-    const raw = await repo.store.readChecked(blob, 1);
-    const { payload } = unwrapObject(raw);
-    if (payload.tag !== "bytes") throw fail(CODES.corruptObject, "bad blob");
-    files.set(p, { bytes: payload.value, executable: false });
-  }
-  const pb = (content: Uint8Array): string => {
-    const bytes = encodeBlob(content);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const pt = (entries: ReadonlyArray<{ name: string; kind: "file" | "dir" | "symlink"; target: string; executable: boolean }>): string => {
-    const bytes = encodeTree(entries);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const built = buildTreeFromFiles(files, merged.symlinks, { putBlob: pb, putTree: pt });
-  for (const bytes of pending.values()) await repo.store.put(bytes);
-  const finalRoot = built.rootId;
+  const exec = new Map([...merged.files.keys()].map((path) => [path, execOf(path)] as const));
+  const finalRoot = await materializeMerged(repo, layerWorkspaceDir(repo, ref.id), { files: new Map(merged.files), symlinks: new Map(merged.symlinks) }, exec);
   await updateJournal(repo.metaDir, operationId, { state: "objects_durable", payload: { checkpoint: cpId, root: finalRoot } });
   const contextIds = await collectLayerContexts(repo, [ref.id]);
   const pubBytes = encodePublication({
@@ -163,7 +122,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
     operationId
   });
   const pubId = await repo.store.put(pubBytes);
-  const worldBytes = (await import("./core/objects.js")).encodeWorldVersion({
+  const worldBytes = encodeWorldVersion({
     repoId: repo.repoId,
     seq: prior.seq + 1,
     rootId: finalRoot,
@@ -194,7 +153,6 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
   const worlds = { ...next.worldsBySeq, [String(prior.seq + 1)]: worldId };
   const layers = { ...next.layers, [ref.id]: { ...still, state: "published" as LayerState, workspace: still.workspace } };
   const swapped: typeof next = { currentWorld: worldId, worldsBySeq: worlds, layers };
-  const { casRefs } = await import("./core/refs.js");
   const ok = await casRefs(repo.metaDir, snapshot, swapped);
   if (!ok) throw fail(CODES.busy, "concurrent publish; retry", { layerId: ref.id, operationId, retryable: true });
   await updateJournal(repo.metaDir, operationId, { state: "accepted", payload: { worldId } });
@@ -228,11 +186,17 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   const cur = await currentWorldId(repo);
   const curW = decodeWorldVersion(await repo.store.readChecked(cur, 3));
   const curFlat = await flattenRoot(repo.store, curW.rootId);
-  const contribs: Array<{ layerId: string; cpId: string; anchorId: string; flat: { files: Map<string, string>; symlinks: Map<string, string> } }> = [];
+  const curExec = await readFlat(repo.store, curW.rootId);
+  const contribs: Array<{ layerId: string; cpId: string; anchorId: string; flat: { files: Map<string, string>; symlinks: Map<string, string> }; exec: Map<string, boolean> }> = [];
   for (let i = 0; i < live.length; i++) {
     const cp = decodeCheckpoint(await repo.store.readChecked(cpIds[i]!, 4));
-    const anchorFlat = await flattenRoot(repo.store, decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId);
-    const layerFlat = await flattenRoot(repo.store, cp.rootId);
+    const anchorRoot = decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId;
+    const [anchorFlat, layerFlat, anchorExecFlat, layerExecFlat] = await Promise.all([
+      flattenRoot(repo.store, anchorRoot),
+      flattenRoot(repo.store, cp.rootId),
+      readFlat(repo.store, anchorRoot),
+      readFlat(repo.store, cp.rootId)
+    ]);
     const norm = structuralCompatible(anchorFlat, curFlat, layerFlat);
     if (!norm.ok) {
       throw fail(CODES.conflict, `cannot normalize layer ${live[i]!.id} onto current world`, {
@@ -241,15 +205,30 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
         paths: norm.conflicts.map((c) => c.path)
       });
     }
-    contribs.push({ layerId: live[i]!.id, cpId: cpIds[i]!, anchorId: cp.anchorId, flat: { files: new Map(norm.merged.files), symlinks: new Map(norm.merged.symlinks) } });
+    const exec = new Map<string, boolean>();
+    for (const path of norm.merged.files.keys()) {
+      const anchorBlob = anchorFlat.files.get(path) ?? null;
+      const layerBlob = layerFlat.files.get(path) ?? null;
+      if (layerBlob !== null && layerBlob !== anchorBlob) exec.set(path, layerExecFlat.files.get(path)?.executable ?? false);
+      else exec.set(path, anchorExecFlat.files.get(path)?.executable ?? layerExecFlat.files.get(path)?.executable ?? false);
+    }
+    contribs.push({ layerId: live[i]!.id, cpId: cpIds[i]!, anchorId: cp.anchorId, flat: { files: new Map(norm.merged.files), symlinks: new Map(norm.merged.symlinks) }, exec });
   }
   const order = orderSources(contribs.map((c) => ({ layerId: c.layerId, anchorId: c.anchorId, cpId: c.cpId })));
   let acc = { files: new Map(curFlat.files), symlinks: new Map(curFlat.symlinks) };
+  const accExec = new Map<string, boolean>([...curExec.files].map(([path, ref]) => [path, ref.executable] as const));
   for (const lid of order) {
     const c = contribs.find((x) => x.layerId === lid)!;
     const v = structuralCompatible(curFlat, acc, c.flat);
     if (!v.ok) {
       throw fail(CODES.conflict, "stack conflicts", { operationId: opId, paths: v.conflicts.map((x) => x.path), hint: "resolve in source layers and retry" });
+    }
+    for (const [path, blob] of v.merged.files) {
+      const before = acc.files.get(path) ?? null;
+      if (blob !== before) accExec.set(path, c.exec.get(path) ?? accExec.get(path) ?? false);
+    }
+    for (const path of [...acc.files.keys()]) {
+      if (!v.merged.files.has(path)) accExec.delete(path);
     }
     acc = { files: new Map(v.merged.files), symlinks: new Map(v.merged.symlinks) };
   }
@@ -262,38 +241,15 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
-  const files = new Map<string, { bytes: Uint8Array; executable: boolean }>();
-  for (const [p, blob] of acc.files) {
-    const raw = await repo.store.readChecked(blob, 1);
-    const { payload } = unwrapObject(raw);
-    if (payload.tag !== "bytes") throw fail(CODES.corruptObject, "bad blob");
-    files.set(p, { bytes: payload.value, executable: false });
-  }
-  const pending = new Map<string, Uint8Array>();
-  const pb = (content: Uint8Array): string => {
-    const bytes = encodeBlob(content);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const pt = (entries: ReadonlyArray<{ name: string; kind: "file" | "dir" | "symlink"; target: string; executable: boolean }>): string => {
-    const bytes = encodeTree(entries);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const built = buildTreeFromFiles(files, acc.symlinks, { putBlob: pb, putTree: pt });
-  for (const bytes of pending.values()) await repo.store.put(bytes);
+  const flat = { files: new Map([...acc.files].map(([path, blobId]) => [path, { blobId, executable: accExec.get(path) ?? false }] as const)), symlinks: acc.symlinks };
+  const hydrated = await hydrate(repo.store, flat);
+  const files = new Map<string, { bytes: Uint8Array; executable: boolean }>(hydrated);
+  const stager = new TreeStager();
+  const built = buildTreeFromFiles(files, acc.symlinks, stager);
+  await stager.flush(repo.store);
+  const builtRoot = built.rootId;
   const destId = newId16();
   const contextIds = await collectLayerContexts(repo, live.map((s) => s.id));
-  const stackBytes = encodeStack({
-    sources: contribs.map((c) => ({ layerId: c.layerId, checkpointId: c.cpId, rootId: decodeCheckpointSync(c.cpId, repo) })),
-    anchorId: cur,
-    destLayerId: destId,
-    rootId: built.rootId,
-    order,
-    contextIds,
-    operationId: opId
-  });
-  void stackBytes;
   const stackId = await repo.store.put(
     encodeStack({
       sources: await Promise.all(
@@ -305,13 +261,13 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
       ),
       anchorId: cur,
       destLayerId: destId,
-      rootId: built.rootId,
+      rootId: builtRoot,
       order,
       contextIds,
       operationId: opId
     })
   );
-  const destCp = encodeCheckpointObj({ layerId: destId, originKind: 1, originId: cur, anchorId: cur, rootId: built.rootId, prevId: null, recordId: stackId, contextIds });
+  const destCp = encodeCheckpointObj({ layerId: destId, originKind: 1, originId: cur, anchorId: cur, rootId: builtRoot, prevId: null, recordId: stackId, contextIds });
   const destCpId = await repo.store.put(destCp);
   const snapshot = await loadRefs(repo.metaDir);
   for (const s of live) {
@@ -325,20 +281,13 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     const r = next.layers[s.id]!;
     next.layers[s.id] = { ...r, state: "consumed" as LayerState };
   }
-  const { casRefs: cas } = await import("./core/refs.js");
-  const ok = await cas(repo.metaDir, snapshot, next);
+  const ok = await casRefs(repo.metaDir, snapshot, next);
   if (!ok) throw fail(CODES.busy, "concurrent stack; retry", { operationId: opId, retryable: true });
   await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId } });
-  await materializeFromRoot(repo, ws, built.rootId);
+  await materializeFromRoot(repo, ws, builtRoot);
   return { destId, workspace: ws, operationId: opId, order };
-}
-
-function decodeCheckpointSync(_cpId: string, _repo: Repo): string {
-  return _cpId;
 }
 
 function orderSources(sources: ReadonlyArray<{ layerId: string; anchorId: string; cpId: string }>): ReadonlyArray<string> {
   return [...sources].sort((a, b) => (a.layerId < b.layerId ? -1 : a.layerId > b.layerId ? 1 : 0)).map((s) => s.layerId);
 }
-
-export { openRepo };

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CODES, fail, type LayerState } from "./types.js";
 
@@ -53,7 +53,7 @@ export async function writeJsonAtomic(path: string, value: unknown, syncDir = tr
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`);
-  const fh = await import("node:fs/promises").then((m) => m.open(tmp, "r"));
+  const fh = await open(tmp, "r");
   try {
     await fh.sync();
   } finally {
@@ -62,7 +62,7 @@ export async function writeJsonAtomic(path: string, value: unknown, syncDir = tr
   await rename(tmp, path);
   if (syncDir) {
     try {
-      const dh = await import("node:fs/promises").then((m) => m.open(dirname(path), "r"));
+      const dh = await open(dirname(path), "r");
       try {
         await dh.sync();
       } finally {

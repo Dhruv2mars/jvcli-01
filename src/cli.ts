@@ -1,5 +1,7 @@
 import { Effect } from "effect";
+import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { unwrapObject } from "./core/cbor.js";
 import { CODES, JvError, fail } from "./core/types.js";
 import { openRepo, currentWorldId, resolveWorldSelector, flattenRoot } from "./core/repo.js";
 import { initRepository } from "./domain-init.js";
@@ -19,7 +21,7 @@ import {
 import { publishLayer, stackLayers } from "./domain-compose.js";
 import { layerContextStatus, sessionAppend, sessionEnd, sessionStart } from "./domain-context.js";
 import { gcRepo, verifyRepo } from "./domain-verify.js";
-import { loadRefs } from "./core/refs.js";
+import { loadRefs, resolveLayerRef } from "./core/refs.js";
 import { decodeCheckpoint, decodeContextManifest, decodeWorldVersion, diffTrees } from "./core/objects.js";
 import { findRepoRoot, findLayerForCwd } from "./locate.js";
 
@@ -205,7 +207,6 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       if (sel === null || sel === "") throw fail(CODES.invalidPath, "history needs --world or --layer <id>");
       const repo2 = repo;
       const refs = await loadRefs(repo2.metaDir);
-      const { resolveLayerRef } = await import("./core/refs.js");
       const ref = resolveLayerRef(refs, sel);
       const chain: Array<{ id: string; anchor: string; root: string }> = [];
       let cur: string | null = ref.checkpoint;
@@ -236,10 +237,10 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
         }
       }
       const bytes = await repo.store.read(id);
-      const { type } = (await import("./core/cbor.js")).unwrapObject(bytes);
+      const { type } = unwrapObject(bytes);
       const names = ["", "blob", "tree", "world", "checkpoint", "context-object", "context-manifest", "publication", "refresh", "stack"];
       if (type === 1) {
-        const { payload } = (await import("./core/cbor.js")).unwrapObject(bytes);
+        const { payload } = unwrapObject(bytes);
         if (payload.tag === "bytes") process.stdout.write(payload.value);
         emit(out(``, { ok: true, id, type: names[type] }), true && false ? json : false);
         return;
@@ -266,8 +267,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
         }
         try {
           const refs = await loadRefs(repo.metaDir);
-          const { resolveLayerRef: rlr } = await import("./core/refs.js");
-          const ref = rlr(refs, s);
+          const ref = resolveLayerRef(refs, s);
           return decodeCheckpoint(await repo.store.readChecked(ref.checkpoint, 4)).rootId;
         } catch {
           // raw root/tree/checkpoint id
@@ -319,7 +319,6 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       };
       const output = flag(args, "--output");
       if (output !== null && output !== "") {
-        const { writeFile } = await import("node:fs/promises");
         await writeFile(resolve(output), `${JSON.stringify(bundle, null, 2)}\n`);
         emit(out(`bundle: ${resolve(output)}\n`, { ok: true, ...bundle, output: resolve(output) }), json);
       } else {
@@ -391,8 +390,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
         case "refresh": {
           const sel = rest2[0] ?? (await findLayerForCwd(process.cwd()).catch(() => null));
           if (sel === null || sel === undefined) throw fail(CODES.invalidPath, "refresh needs a layer");
-          const before = await flushLayer(repo, sel);
-          void before;
+          await flushLayer(repo, sel);
           const r = await refreshLayer(repo, sel);
           if (r.conflicts.length > 0) {
             const e = fail(CODES.conflict, `refresh conflicts: ${r.conflicts.map((c) => c.path).join(", ")}`, { paths: r.conflicts.map((c) => c.path) });
@@ -450,8 +448,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
           const sel = flag(rest2, "--layer") ?? rest2[0] ?? (await findLayerForCwd(process.cwd()).catch(() => null));
           if (sel === null || sel === undefined || sel === "") throw fail(CODES.invalidPath, "context status needs a layer");
           const refs = await loadRefs(repo.metaDir);
-          const { resolveLayerRef: rlr } = await import("./core/refs.js");
-          const ref = rlr(refs, sel);
+          const ref = resolveLayerRef(refs, sel);
           const s = await layerContextStatus(repo, ref.id);
           emit(
             out(
@@ -492,8 +489,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
           const layer = flag(rest2, "--layer") ?? (await findLayerForCwd(process.cwd()).catch(() => null));
           if (layer === null || layer === undefined || layer === "") throw fail(CODES.invalidPath, "context begin needs --layer");
           const refs = await loadRefs(repo.metaDir);
-          const { resolveLayerRef: rlr2 } = await import("./core/refs.js");
-          const ref = rlr2(refs, layer);
+          const ref = resolveLayerRef(refs, layer);
           const sessionFlag = flag(rest2, "--session");
           const parentFlag = flag(rest2, "--parent");
           const formatFlag = flag(rest2, "--format");
@@ -519,15 +515,14 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
           const file = flag(rest2, "--file");
           let bytes: Uint8Array;
           if (file !== null && file !== "") {
-            bytes = await import("node:fs/promises").then((m) => m.readFile(resolve(file)));
+            bytes = await readFile(resolve(file));
           } else if (text !== null) {
             bytes = new TextEncoder().encode(text === "" ? "" : text);
           } else {
             throw fail(CODES.invalidPath, "context append needs --text or --file");
           }
           const refs = await loadRefs(repo.metaDir);
-          const { resolveLayerRef: rlr3 } = await import("./core/refs.js");
-          const ref = rlr3(refs, layer);
+          const ref = resolveLayerRef(refs, layer);
           const r = await sessionAppend(repo, ref.id, session, [{ kind, bytes }]);
           emit(out(`manifest: ${r.manifest}\nobjects: ${r.objects.length}\n`, { ok: true, ...r }), j);
           return;
@@ -539,8 +534,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
             throw fail(CODES.invalidPath, "context end needs --layer and --session");
           }
           const refs = await loadRefs(repo.metaDir);
-          const { resolveLayerRef: rlr4 } = await import("./core/refs.js");
-          const ref = rlr4(refs, layer);
+          const ref = resolveLayerRef(refs, layer);
           const m = await sessionEnd(repo, ref.id, session, has(rest2, "--interrupted") ? "interrupted" : "complete");
           emit(out(`manifest: ${m}\n`, { ok: true, manifest: m }), j);
           return;
