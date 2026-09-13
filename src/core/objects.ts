@@ -147,19 +147,31 @@ export interface PathChange {
   readonly newBlob: string | null;
 }
 
+export interface FlatExec {
+  readonly files: ReadonlyMap<string, { blob: string; executable: boolean }>;
+  readonly symlinks: ReadonlyMap<string, string>;
+}
+
 export function diffTrees(
-  base: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> },
-  next: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> }
+  base: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> } | FlatExec,
+  next: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> } | FlatExec
 ): ReadonlyArray<PathChange> {
+  const baseFiles = base.files as ReadonlyMap<string, unknown>;
+  const nextFiles = next.files as ReadonlyMap<string, unknown>;
+  const blobOf = (v: unknown): string | null => (typeof v === "string" ? v : v === null || v === undefined ? null : (v as { blob: string }).blob ?? null);
+  const execOf = (v: unknown): boolean | null => (typeof v === "string" ? null : v === null || v === undefined ? null : ((v as { executable: boolean }).executable ?? null));
   const out: Array<PathChange> = [];
   const paths = new Set<string>([...base.files.keys(), ...next.files.keys(), ...base.symlinks.keys(), ...next.symlinks.keys()]);
   for (const path of [...paths].sort()) {
-    const bF = base.files.get(path) ?? null;
-    const nF = next.files.get(path) ?? null;
+    const bF = blobOf(baseFiles.get(path));
+    const nF = blobOf(nextFiles.get(path));
     const bL = base.symlinks.get(path) ?? null;
     const nL = next.symlinks.get(path) ?? null;
     if (bF !== null && nF !== null) {
       if (bF !== nF) out.push({ path, kind: "modify", oldBlob: bF, newBlob: nF });
+      else if (execOf(baseFiles.get(path)) !== execOf(nextFiles.get(path)) && (execOf(baseFiles.get(path)) !== null || execOf(nextFiles.get(path)) !== null)) {
+        out.push({ path, kind: "metadata-change", oldBlob: bF, newBlob: nF });
+      }
     } else if (bL !== null && nL !== null) {
       if (bL !== nL) out.push({ path, kind: "modify", oldBlob: null, newBlob: null });
     } else if (bF !== null || bL !== null) {
@@ -187,10 +199,14 @@ function ancestors(path: string): ReadonlyArray<string> {
   return out;
 }
 
+export type MergeView =
+  | { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> }
+  | FlatExec;
+
 export function structuralCompatible(
-  base: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> },
-  left: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> },
-  right: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> }
+  base: MergeView,
+  left: MergeView,
+  right: MergeView
 ):
   | { ok: true; merged: { files: Map<string, string>; symlinks: Map<string, string> } }
   | { ok: false; conflicts: ReadonlyArray<Conflict> } {
@@ -198,15 +214,29 @@ export function structuralCompatible(
   const rightChanges = new Map(diffTrees(base, right).map((c) => [c.path, c] as const));
   const conflicts: Array<Conflict> = [];
   const paths = new Set<string>([...leftChanges.keys(), ...rightChanges.keys()]);
+  const valOf = (v: MergeView, path: string): string | null => {
+    const f = (v.files as ReadonlyMap<string, unknown>).get(path) ?? null;
+    if (typeof f === "string") return f;
+    if (f !== null && f !== undefined) return (f as { blob: string }).blob;
+    return v.symlinks.get(path) ?? null;
+  };
   for (const path of paths) {
     const l = leftChanges.get(path) ?? null;
     const r = rightChanges.get(path) ?? null;
     if (l === null || r === null) continue;
-    const lVal = left.files.get(path) ?? left.symlinks.get(path) ?? null;
-    const rVal = right.files.get(path) ?? right.symlinks.get(path) ?? null;
+    const lVal = valOf(left, path);
+    const rVal = valOf(right, path);
     if (lVal !== null && rVal !== null && lVal === rVal && l.kind === r.kind) continue;
     if (l.kind === "delete" && r.kind === "delete") continue;
-    if (l.kind === "modify" && r.kind === "modify") {
+    if (l.kind === "metadata-change" && r.kind === "metadata-change") {
+      conflicts.push({ path, kind: "both-write" });
+    } else if (l.kind === "metadata-change" || r.kind === "metadata-change") {
+      const other = l.kind === "metadata-change" ? r : l;
+      if (other.kind === "modify" || other.kind === "delete" || other.kind === "type-change") {
+        conflicts.push({ path, kind: "both-write" });
+      }
+      continue;
+    } else if (l.kind === "modify" && r.kind === "modify") {
       conflicts.push({ path, kind: "both-write" });
     } else if (l.kind === "delete" || r.kind === "delete") {
       conflicts.push({ path, kind: "delete-modify" });
@@ -225,14 +255,23 @@ export function structuralCompatible(
     conflicts.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
     return { ok: false, conflicts };
   }
-  const mergedFiles = new Map<string, string>(base.files);
+  const blobMap = (v: MergeView): Map<string, string> => {
+    const out = new Map<string, string>();
+    for (const [path, val] of v.files as ReadonlyMap<string, unknown>) {
+      if (typeof val === "string") out.set(path, val);
+      else if (val !== null && val !== undefined) out.set(path, (val as { blob: string }).blob);
+    }
+    return out;
+  };
+  const mergedFiles = blobMap(base);
   const mergedLinks = new Map<string, string>(base.symlinks);
   const apply = (
     changes: ReadonlyMap<string, PathChange>,
-    view: { files: ReadonlyMap<string, string>; symlinks: ReadonlyMap<string, string> }
+    view: MergeView
   ): void => {
+    const blobs = blobMap(view);
     for (const [path] of changes) {
-      const f = view.files.get(path);
+      const f = blobs.get(path);
       const s = view.symlinks.get(path);
       if (f !== undefined) {
         mergedFiles.set(path, f);

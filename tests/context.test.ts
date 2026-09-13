@@ -54,6 +54,7 @@ describe("agent context gating", () => {
       expect(denied.json).not.toBeNull();
       expect(denied.json.ok).toBe(false);
       expect(denied.json.error.code).toBe("E_MISSING_CONTEXT");
+      expect(denied.json.error.retryable).toBe(true);
 
       const allowed = runCliJson(repo, ["publish", id, "--allow-missing-context"]);
       expect(allowed.code).toBe(0);

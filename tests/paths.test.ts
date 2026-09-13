@@ -193,3 +193,28 @@ describe("ignoreMatch semantics", () => {
     expect(ignoreMatch(parseIgnoreFile("*.log"), "A.LOG", false)).toBe(false);
   });
 });
+
+describe("scanDirectory symlink handling", () => {
+  test("in-tree symlink survives when cwd differs from scan root", async () => {
+    const { mkTempRepo, rmTemp, seedSymlink, runCliJson } = await import("./e2e-helpers.ts");
+    const t = mkTempRepo({ "a.txt": "a\n" });
+    try {
+      seedSymlink(t.repo, "g.lnk", "a.txt");
+      const { scanDirectory } = await import("../src/core/scan.ts");
+      const outside = await import("node:os").then((m) => m.tmpdir());
+      const prev = process.cwd();
+      process.chdir(outside);
+      try {
+        const scan = await scanDirectory(t.repo);
+        expect(scan.symlinks.get("g.lnk")).toBe("a.txt");
+        expect(scan.warnings.join("\n")).not.toContain("g.lnk");
+      } finally {
+        process.chdir(prev);
+      }
+      const init2 = runCliJson(t.repo, ["status"]);
+      expect(init2.code).toBe(0);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+});

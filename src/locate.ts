@@ -23,9 +23,10 @@ export async function findLayerForCwd(cwd: string): Promise<string> {
     const marker = join(cur, ".jvcli-layer");
     try {
       const [raw, st] = await Promise.all([readFile(marker, "utf8"), stat(marker)]);
-      if (!st.isFile()) continue;
-      const id = raw.trim().toLowerCase();
-      if (/^[0-9a-f]{32}$/.test(id)) return id;
+      if (st.isFile()) {
+        const id = raw.trim().toLowerCase();
+        if (/^[0-9a-f]{32}$/.test(id)) return id;
+      }
     } catch {
       // keep walking
     }

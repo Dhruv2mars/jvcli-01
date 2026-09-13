@@ -177,3 +177,18 @@ describe("merge reference model", () => {
     }
   });
 });
+
+describe("chmod-only merge rule", () => {
+  test("two chmods to the same bit merge; chmod versus content change conflicts", () => {
+    const A = "a".repeat(64);
+    const B = "b".repeat(64);
+    const E = (blob: string, executable: boolean) => ({ blob, executable });
+    const base = { files: new Map([["f.txt", E(A, false)]]), symlinks: new Map<string, string>() };
+    const sameChmod = { files: new Map([["f.txt", E(A, true)]]), symlinks: new Map<string, string>() };
+    const v = structuralCompatible(base, sameChmod, sameChmod);
+    expect(v.ok).toBe(true);
+    const modify = { files: new Map([["f.txt", B]]), symlinks: new Map<string, string>() };
+    expect(structuralCompatible(base, sameChmod, modify).ok).toBe(false);
+    expect(structuralCompatible(base, modify, sameChmod).ok).toBe(false);
+  });
+});

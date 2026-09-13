@@ -1,6 +1,6 @@
 import { decodeContextManifest, decodeContextObject, encodeContextManifest, encodeContextObject } from "./core/objects.js";
 import { newId16 } from "./core/ids.js";
-import { loadRefs, saveRefs } from "./core/refs.js";
+import { casRefs, loadRefs } from "./core/refs.js";
 import { CODES, fail } from "./core/types.js";
 import { checkpointLayer } from "./domain-layers.js";
 import type { Repo } from "./core/repo.js";
@@ -41,7 +41,9 @@ export async function sessionStart(repo: Repo, layerId: string, opts: { sessionI
     agent: live.agent ?? opts.agent ?? sessionId,
     sessions: { ...live.sessions, [sessionId]: manifestId }
   };
-  await saveRefs(repo.metaDir, next);
+  if (!await casRefs(repo.metaDir, refs, next)) {
+    throw fail(CODES.busy, "layer changed during context start; retry", { layerId, retryable: true });
+  }
   return { manifest: manifestId, sessionId };
 }
 
@@ -92,9 +94,17 @@ export async function sessionAppend(
     gaps
   });
   const manifestId = await repo.store.put(manifestBytes);
-  const next = structuredClone(refs);
-  next.layers[layerId] = { ...ref, sessions: { ...ref.sessions, [sid]: manifestId } };
-  await saveRefs(repo.metaDir, next);
+  const latest = await loadRefs(repo.metaDir);
+  const latestRef = latest.layers[layerId];
+  if (latestRef === undefined) throw fail(CODES.layerNotFound, "no such layer", { layerId });
+  if (latestRef.sessions[sid] !== currentManifestId) {
+    throw fail(CODES.busy, "session advanced concurrently; retry the append", { layerId, retryable: true });
+  }
+  const next = structuredClone(latest);
+  next.layers[layerId] = { ...latestRef, sessions: { ...latestRef.sessions, [sid]: manifestId } };
+  if (!await casRefs(repo.metaDir, latest, next)) {
+    throw fail(CODES.busy, "session advanced concurrently; retry the append", { layerId, retryable: true });
+  }
   return { manifest: manifestId, objects: objectIds };
 }
 
@@ -129,9 +139,17 @@ export async function sessionEnd(repo: Repo, layerId: string, sessionId: string,
     gaps: endGaps
   });
   const nid = await repo.store.put(next);
-  const refs2 = structuredClone(refs);
-  refs2.layers[layerId] = { ...ref, sessions: { ...ref.sessions, [sid]: nid } };
-  await saveRefs(repo.metaDir, refs2);
+  const latest = await loadRefs(repo.metaDir);
+  const latestRef = latest.layers[layerId];
+  if (latestRef === undefined) throw fail(CODES.layerNotFound, "no such layer", { layerId });
+  if (latestRef.sessions[sid] !== curId) {
+    throw fail(CODES.busy, "session advanced concurrently; retry the seal", { layerId, retryable: true });
+  }
+  const refs2 = structuredClone(latest);
+  refs2.layers[layerId] = { ...latestRef, sessions: { ...latestRef.sessions, [sid]: nid } };
+  if (!await casRefs(repo.metaDir, latest, refs2)) {
+    throw fail(CODES.busy, "session advanced concurrently; retry the seal", { layerId, retryable: true });
+  }
   await checkpointLayer(repo, layerId, null, [nid]);
   return nid;
 }

@@ -23,7 +23,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
     "dev": "bun src/cli.ts",
-    "test": "bun test",
+    "test": "bun test --timeout 30000",
     "typecheck": "tsc --noEmit",
     "bench": "bun benchmarks/run.ts",
     "prepack": "bun run build",

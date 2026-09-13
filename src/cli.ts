@@ -3,7 +3,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { unwrapObject } from "./core/cbor.js";
 import { CODES, JvError, fail } from "./core/types.js";
-import { openRepo, currentWorldId, resolveWorldSelector, flattenRoot } from "./core/repo.js";
+import { openRepo, currentWorldId, resolveWorldSelector } from "./core/repo.js";
+import { readFlat } from "./core/tree-stage.js";
 import { initRepository } from "./domain-init.js";
 import {
   childLayer,
@@ -71,7 +72,7 @@ Usage:
   jvcli layer status <layer> [--json]
   jvcli layer refresh <layer> [--json]
   jvcli layer delete <layer> [--json]
-  jvcli stack <layer>... [--into <name>] [--json]
+  jvcli stack <layer>... [--into <name>] [--operation-id <id>] [--json]
   jvcli publish <layer> [--allow-missing-context] [--operation-id <id>] [--json]
   jvcli context status [--layer <id>] [--json]
   jvcli context sessions [--layer <id>] [--json]
@@ -81,6 +82,8 @@ Usage:
   jvcli context end --layer <id> --session <id> [--interrupted] [--json]
 `;
 
+const VALUE_FLAGS = new Set(["--layer", "--name", "--from", "--checkpoint", "--into", "--operation-id", "--output", "--session", "--parent", "--agent", "--format", "--kind", "--ordinal", "--text", "--file"]);
+
 function flag(args: ReadonlyArray<string>, name: string): string | null {
   const i = args.indexOf(name);
   if (i === -1) return null;
@@ -89,11 +92,39 @@ function flag(args: ReadonlyArray<string>, name: string): string | null {
   return v;
 }
 
+function positionals(args: ReadonlyArray<string>): Array<string> {
+  const out: Array<string> = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith("--")) {
+      if (VALUE_FLAGS.has(a)) i++;
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
 function has(args: ReadonlyArray<string>, name: string): boolean {
   return args.includes(name);
 }
 
+let pipeGuarded = false;
+
+function guardPipe(): void {
+  if (pipeGuarded) return;
+  pipeGuarded = true;
+  process.stdout.on("error", (e: Error & { code?: string }) => {
+    process.exitCode = 1;
+    if (e.code === "EPIPE") process.stdout.destroy();
+  });
+  process.stderr.on("error", () => {
+    process.exitCode = 1;
+  });
+}
+
 function emit(o: Output, json: boolean): void {
+  guardPipe();
   if (json) process.stdout.write(`${JSON.stringify(o.json, null, 2)}\n`);
   else process.stdout.write(o.human.endsWith("\n") ? o.human : `${o.human}\n`);
 }
@@ -146,6 +177,7 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
     }
     case "status": {
       const layerFlag = flag(args, "--layer");
+      if (layerFlag === "") throw fail(CODES.invalidPath, "status --layer needs a value");
       const root = await repoRootOrThrow(process.cwd());
       const repo = await openRepo(root);
       const refs = await loadRefs(repo.metaDir);
@@ -241,8 +273,10 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       const names = ["", "blob", "tree", "world", "checkpoint", "context-object", "context-manifest", "publication", "refresh", "stack"];
       if (type === 1) {
         const { payload } = unwrapObject(bytes);
-        if (payload.tag === "bytes") process.stdout.write(payload.value);
-        emit(out(``, { ok: true, id, type: names[type] }), true && false ? json : false);
+        if (payload.tag === "bytes") {
+          guardPipe();
+          process.stdout.write(payload.value);
+        }
         return;
       }
       emit(out(`object ${id} type ${names[type]}\n`, { ok: true, id, type: names[type] }), json);
@@ -282,8 +316,12 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
       };
       const lroot = await resolveState(left);
       const rroot = right === undefined ? await flattenRootId(repo, await currentWorldId(repo)) : await resolveState(right);
-      const lf = await flattenRoot(repo.store, lroot);
-      const rf = await flattenRoot(repo.store, rroot);
+      const toExecView = (flat: { files: ReadonlyMap<string, { blobId: string; executable: boolean }>; symlinks: ReadonlyMap<string, string> }) => ({
+        files: new Map([...flat.files].map(([p, v]) => [p, { blob: v.blobId, executable: v.executable }] as const)),
+        symlinks: flat.symlinks
+      });
+      const lf = toExecView(await readFlat(repo.store, lroot));
+      const rf = toExecView(await readFlat(repo.store, rroot));
       const changes = diffTrees(lf, rf);
       const lines = changes.map((c) => `${c.kind}\t${c.path}`);
       emit(out(`${lines.join("\n")}${lines.length > 0 ? "\n" : "no changes\n"}`, { ok: true, left: lroot, right: rroot, changes }), json);
@@ -442,15 +480,15 @@ async function execute(argv: ReadonlyArray<string>): Promise<void> {
     }
     case "stack": {
       const into = flag(args, "--into") ?? undefined;
-      const selectors = args.filter((a) => !a.startsWith("--") && a !== (flag(args, "--into") ?? "\0"));
+      const selectors = positionals(args);
       const root = await repoRootOrThrow(process.cwd());
       const repo = await openRepo(root);
-      const r = await stackLayers(repo, selectors, into === "" ? undefined : into ?? undefined);
+      const r = await stackLayers(repo, selectors, into === "" ? undefined : into ?? undefined, flag(args, "--operation-id") ?? undefined);
       emit(out(`stacked into ${r.destId}\nworkspace: ${r.workspace}\n`, { ok: true, dest: r.destId, workspace: r.workspace, operation: r.operationId, order: r.order }), json);
       return;
     }
     case "publish": {
-      const sel = args.find((a) => !a.startsWith("--")) ?? (await findLayerForCwd(process.cwd()).catch(() => null));
+      const sel = positionals(args)[0] ?? (await findLayerForCwd(process.cwd()).catch(() => null));
       if (sel === null || sel === undefined) throw fail(CODES.invalidPath, "publish needs a layer");
       const root = await repoRootOrThrow(process.cwd());
       const repo = await openRepo(root);

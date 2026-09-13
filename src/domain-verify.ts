@@ -42,7 +42,10 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
         if (String(w.seq) !== seq) issues.push({ kind: "seq-mismatch", detail: `${id} seq ${w.seq} != ${seq}` });
         await checkObject(w.rootId, 2);
         if (w.prevId !== null) await checkObject(w.prevId, 3);
-        if (w.publicationId !== null) await checkObject(w.publicationId, 7);
+        if (w.publicationId !== null) {
+          const pb = await checkObject(w.publicationId, 7);
+          if (pb !== null) checkPublicationBody(pb, w, id, issues);
+        }
         for (const c of w.contextIds) await checkObject(c, 6);
         if (full) await checkTree(repo, w.rootId, issues);
       } catch (e) {
@@ -61,7 +64,8 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
         await checkObject(cp.rootId, 2);
         if (cp.prevId !== null) await checkObject(cp.prevId, 4);
         if (cp.recordId !== null) {
-          await checkObject(cp.recordId);
+          const rb = await checkObject(cp.recordId);
+          if (rb !== null) checkRecordBody(rb, layer.id, cp, issues);
         }
         for (const c of cp.contextIds) await checkObject(c, 6);
         if (full) await checkTree(repo, cp.rootId, issues);
@@ -90,6 +94,51 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
   }
   if (issues.length > 0) throw fail(CODES.corruptObject, `verify failed: ${issues[0]!.detail}`, { paths: issues.map((i) => i.detail).slice(0, 10) });
   return { worlds: Object.keys(refs.worldsBySeq).length, layers: Object.values(refs.layers).filter((l) => l.state !== "deleted").length, objects, issues };
+}
+
+function checkPublicationBody(
+  raw: Uint8Array,
+  w: { rootId: string; seq: number; contextIds: ReadonlyArray<string> },
+  worldId: string,
+  issues: Array<VerifyIssue>
+): void {
+  try {
+    const p = decodePublication(raw);
+    if (p.rootId !== w.rootId) issues.push({ kind: "publication-root-mismatch", detail: worldId });
+    if (p.seq !== w.seq) issues.push({ kind: "publication-seq-mismatch", detail: worldId });
+    if (JSON.stringify([...p.contextIds].sort()) !== JSON.stringify([...w.contextIds].sort())) {
+      issues.push({ kind: "publication-context-mismatch", detail: worldId });
+    }
+  } catch (e) {
+    issues.push({ kind: "bad-publication", detail: `${worldId}: ${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+function checkRecordBody(
+  raw: Uint8Array,
+  layerId: string,
+  cp: { rootId: string; anchorId: string; prevId: string | null },
+  issues: Array<VerifyIssue>
+): void {
+  try {
+    const { type } = unwrapObject(raw);
+    if (type === 8) {
+      const r = decodeRefresh(raw);
+      if (r.layerId !== layerId) issues.push({ kind: "record-layer-mismatch", detail: layerId });
+      if (r.rootId !== cp.rootId) issues.push({ kind: "refresh-root-mismatch", detail: layerId });
+      if (cp.prevId === null || r.prevCheckpointId !== cp.prevId) {
+        issues.push({ kind: "refresh-prev-mismatch", detail: layerId });
+      }
+    } else if (type === 9) {
+      const s = decodeStack(raw);
+      if (s.destLayerId !== layerId) issues.push({ kind: "record-layer-mismatch", detail: layerId });
+      if (s.rootId !== cp.rootId) issues.push({ kind: "stack-root-mismatch", detail: layerId });
+    } else {
+      issues.push({ kind: "bad-record-type", detail: `${layerId}: type ${type}` });
+    }
+  } catch (e) {
+    issues.push({ kind: "bad-record", detail: `${layerId}: ${e instanceof Error ? e.message : String(e)}` });
+  }
 }
 
 async function checkTree(repo: { store: { readChecked: (id: string, t?: number) => Promise<Uint8Array> } }, rootId: string, issues: Array<VerifyIssue>): Promise<void> {
@@ -149,7 +198,7 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
     for (const mid of Object.values(l.sessions)) queue.push({ id: mid, type: 6 });
   }
   for (const entry of await listJournals(repo.metaDir)) {
-    if (entry.state === "finalized" || entry.state === "conflict") continue;
+    if (entry.state === "finalized" || entry.state === "accepted" || entry.state === "conflict") continue;
     collectJournalRoots(entry, queue);
   }
   while (queue.length > 0) {

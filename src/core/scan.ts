@@ -47,7 +47,7 @@ export async function scanDirectory(root: string): Promise<ScanResult> {
         }
         const resolved = resolve(dirname(abs), portable);
         const rel2 = relative(root, resolved);
-        if (rel2 === ".." || rel2.startsWith(`..${sep}`) || resolve(rel2) !== resolved || rel2.startsWith("..")) {
+        if (rel2 === ".." || rel2.startsWith(`..${sep}`) || resolve(root, rel2) !== resolved || rel2.startsWith("..")) {
           warnings.push(`skipped escaping symlink: ${rel}`);
           continue;
         }

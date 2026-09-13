@@ -5,7 +5,7 @@
 // output for assertions.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -94,6 +94,13 @@ export function readWs(repo: string, layerId: string, rel: string): string {
 
 export function wsExists(repo: string, layerId: string, rel: string): boolean {
   return existsSync(join(layerWorkspace(repo, layerId), rel));
+}
+
+/** Create a repo-local symlink before init (used for scan symlink tests). */
+export function seedSymlink(repo: string, rel: string, target: string): void {
+  const full = join(repo, rel);
+  mkdirSync(dirname(full), { recursive: true });
+  symlinkSync(target, full);
 }
 
 /** Create a layer and return its id + workspace (asserts success via throw). */

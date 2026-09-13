@@ -169,3 +169,33 @@ describe("workspace autodetect via .jvcli-layer marker", () => {
     }
   });
 });
+
+
+describe("stack operation-id resume", () => {
+  test("repeating a finalized stack op-id returns the same destination", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "RA");
+      const b = createLayer(repo, "RB");
+      writeWs(repo, a.id, "aa.txt", "from-a\n");
+      writeWs(repo, b.id, "bb.txt", "from-b\n");
+      const op = "1".repeat(32);
+      const first = runCliJson(repo, ["stack", a.id, b.id, "--into", "combo", "--operation-id", op]);
+      expect(first.code).toBe(0);
+      const dest = first.json.dest as string;
+      const second = runCliJson(repo, ["stack", a.id, b.id, "--into", "combo", "--operation-id", op]);
+      expect(second.code).toBe(0);
+      expect(second.json.dest).toBe(dest);
+      const list = runCliJson(repo, ["layer", "list"]);
+      expect((list.json.layers as Array<any>).filter((l) => l.name === "combo")).toHaveLength(1);
+      const c = createLayer(repo, "RC");
+      writeWs(repo, c.id, "cc.txt", "from-c\n");
+      const mismatch = runCliJson(repo, ["stack", a.id, c.id, "--into", "combo", "--operation-id", op]);
+      expect(mismatch.code).not.toBe(0);
+      expect(mismatch.json.error.code).toBe("E_IO");
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+});

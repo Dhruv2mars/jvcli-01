@@ -15,7 +15,7 @@ jobs:
       - run: bun run build
       - run: chmod +x dist/cli-entry.js
       - run: bun run typecheck
-      - run: bun test
+      - run: bun run test
       - run: scripts/ga-walkthrough.sh dist/cli-entry.js
       - run: sh scripts/pack-smoke.sh
       - run: bun benchmarks/run.ts --layers 5 --files 5

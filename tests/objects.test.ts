@@ -303,3 +303,50 @@ describe("object encode/decode round-trips", () => {
     expect(() => decodeWorldVersion(encodeBlob(Uint8Array.of(1)))).toThrow();
   });
 });
+
+
+describe("chmod-only visibility", () => {
+  test("same blob with different exec bit reports metadata-change", () => {
+    const A = "a".repeat(64);
+    const base = { files: new Map([["f.txt", { blob: A, executable: false }]]), symlinks: new Map<string, string>() };
+    const next = { files: new Map([["f.txt", { blob: A, executable: true }]]), symlinks: new Map<string, string>() };
+    expect(diffTrees(base, next)).toEqual([{ path: "f.txt", kind: "metadata-change", oldBlob: A, newBlob: A }]);
+    expect(diffTrees(next, base)).toEqual([{ path: "f.txt", kind: "metadata-change", oldBlob: A, newBlob: A }]);
+    expect(diffTrees(base, base)).toEqual([]);
+  });
+
+  test("chmod versus content change on the other side is a conflict", () => {
+    const A = "a".repeat(64);
+    const B = "b".repeat(64);
+    const base = { files: new Map([["f.txt", { blob: A, executable: false }]]), symlinks: new Map<string, string>() };
+    const chmod = { files: new Map([["f.txt", { blob: A, executable: true }]]), symlinks: new Map<string, string>() };
+    const modify = { files: new Map([["f.txt", B, ]]) as unknown as Map<string, string>, symlinks: new Map<string, string>() };
+    const v = structuralCompatible(base, chmod, modify);
+    expect(v.ok).toBe(false);
+  });
+});
+
+describe("resolveLayerRef prefix ambiguity", () => {
+  test("shared prefix reports E_AMBIGUOUS_LAYER, unknown reports E_LAYER_NOT_FOUND", async () => {
+    const { resolveLayerRef } = await import("../src/core/refs.ts");
+    const { CODES } = await import("../src/core/types.ts");
+    void CODES;
+    const base = { currentWorld: "w", worldsBySeq: {}, layers: {} as Record<string, any> };
+    const mk = (id: string) => ({ id, name: null, originKind: 1 as const, originId: "w", checkpoint: "c", state: "active" as const, agent: null, sessions: {}, workspace: null });
+    const refs = { ...base, layers: { abc123: mk("abc123"), abc456: mk("abc456") } };
+    let code = "";
+    try {
+      resolveLayerRef(refs, "abc");
+    } catch (e) {
+      code = (e as { code?: string }).code ?? "";
+    }
+    expect(code).toBe("E_AMBIGUOUS_LAYER");
+    let code2 = "";
+    try {
+      resolveLayerRef(refs, "zzz");
+    } catch (e) {
+      code2 = (e as { code?: string }).code ?? "";
+    }
+    expect(code2).toBe("E_LAYER_NOT_FOUND");
+  });
+});
