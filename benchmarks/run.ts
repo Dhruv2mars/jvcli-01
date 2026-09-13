@@ -77,15 +77,15 @@ async function main(): Promise<void> {
 
     const toPublish = Math.floor(layers / 2);
     const publishSamples: Array<number> = [];
-    for (let r = 0; r < Math.max(1, reps); r++) {
+    if (reps > 1) {
+      throw new Error("--reps above 1 needs fresh layers per rep; run the harness once per sample instead");
+    }
+    {
       const t0 = performance.now();
       for (let i = 0; i < toPublish; i++) {
         await cli(dir, ["publish", ids[i]!, "--allow-missing-context", "--json"]);
       }
       publishSamples.push(performance.now() - t0);
-      if (r === 0) {
-        // First rep publishes; later reps re-run the no-op tail for stability.
-      }
     }
     publishSamples.sort((a, b) => a - b);
 

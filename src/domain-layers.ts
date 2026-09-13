@@ -262,7 +262,14 @@ export async function layerStatus(repo: Repo, selector: string): Promise<LayerIn
   };
 }
 
-const STATUS_CONCURRENCY = Math.max(1, Number(process.env.JVCLI_STATUS_CONCURRENCY ?? 8));
+function statusConcurrency(): number {
+  const raw = process.env.JVCLI_STATUS_CONCURRENCY ?? "8";
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 64) {
+    throw fail(CODES.io, `bad JVCLI_STATUS_CONCURRENCY: ${raw}`, { hint: "use an integer 1-64" });
+  }
+  return n;
+}
 
 async function mapLimit<T, R>(items: ReadonlyArray<T>, limit: number, fn: (item: T) => Promise<R>): Promise<Array<R>> {
   const out: Array<R> = new Array(items.length);
@@ -280,7 +287,7 @@ async function mapLimit<T, R>(items: ReadonlyArray<T>, limit: number, fn: (item:
 export async function listLayers(repo: Repo): Promise<ReadonlyArray<LayerInfo>> {
   const refs = await loadRefs(repo.metaDir);
   const live = Object.values(refs.layers).filter((l) => l.state !== "deleted");
-  return mapLimit(live, STATUS_CONCURRENCY, (l) => layerStatus(repo, l.id));
+  return mapLimit(live, statusConcurrency(), (l) => layerStatus(repo, l.id));
 }
 
 export async function cloneLayer(repo: Repo, selector: string, name?: string, checkpoint?: string): Promise<{ ref: LayerRef; workspace: string }> {
