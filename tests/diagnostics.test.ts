@@ -51,3 +51,27 @@ describe("diagnostics bundle", () => {
     }
   });
 });
+
+describe("diagnostics counts", () => {
+  test("layerStates sums to layers and live journals are fully listed", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "D1");
+      const b = createLayer(repo, "D2");
+      expect(runCliJson(repo, ["layer", "delete", b.id]).code).toBe(0);
+      const d = runCliJson(repo, ["diagnostics", "bundle"]);
+      expect(d.code).toBe(0);
+      const sum = Object.values(d.json.layerStates as Record<string, number>).reduce((x, y) => x + y, 0);
+      expect(sum).toBe(d.json.layers);
+      expect(d.json.layerStates.deleted).toBe(1);
+      const live = d.json.journals.liveOperationIds as Array<string>;
+      const total = d.json.journals.total as number;
+      const archived = d.json.journals.archived as number;
+      expect(live.length + archived).toBe(total);
+      void a;
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+});

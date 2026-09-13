@@ -212,7 +212,7 @@ Example:
 jvcli diagnostics bundle --output /tmp/jvdiag.json
 ```
 
-JSON shape: `{ ok, version: 1, repo, world: { seq, id }, layers, layerStates, staleLayers, worlds, journals: { total, byState, operationIds }, verify: { ok, worlds, layers, objects }, platform, node[, output] }`.
+JSON shape: `{ ok, version: 1, repo, world: { seq, id }, layers, layerStates, staleLayers, worlds, journals: { total, byState, liveOperationIds, archived }, verify: { ok, worlds, layers, objects }, platform, node[, output] }`. `layers` counts every retained ref including tombstones, so it equals the sum of `layerStates`. `liveOperationIds` lists every non-terminal journal id with no cap, and `archived` counts the terminal ones.
 Exit codes: `1` for anything other than the `bundle` subcommand.
 
 ## layer create
