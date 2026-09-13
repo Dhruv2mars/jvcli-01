@@ -174,3 +174,64 @@ describe("gc safety", () => {
     }
   });
 });
+
+describe("delete safety", () => {
+  test("delete refuses while a live journal cites the layer", async () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const { id } = createLayer(repo, "LIVE");
+      const { join } = await import("node:path");
+      const { writeFile } = await import("node:fs/promises");
+      const op = "dddddddddddddddddddddddddddddddd";
+      await writeFile(
+        join(repo, ".javelin", "journal", `${op}.json`),
+        JSON.stringify({
+          op,
+          kind: "publish",
+          state: "objects_durable",
+          layerId: id,
+          operationId: op,
+          payload: {},
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        })
+      );
+      const del = runCliJson(repo, ["layer", "delete", id]);
+      expect(del.code).not.toBe(0);
+      expect(del.json.error.code).toBe("E_BUSY");
+      expect(del.json.error.retryable).toBe(true);
+      const list = runCliJson(repo, ["layer", "list"]);
+      expect((list.json.layers as Array<any>).some((l) => l.id === id)).toBe(true);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("delete succeeds once the journal finalizes", async () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const { id } = createLayer(repo, "DONE");
+      const { join } = await import("node:path");
+      const { writeFile } = await import("node:fs/promises");
+      const op = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+      await writeFile(
+        join(repo, ".javelin", "journal", `${op}.json`),
+        JSON.stringify({
+          op,
+          kind: "publish",
+          state: "finalized",
+          layerId: id,
+          operationId: op,
+          payload: {},
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        })
+      );
+      expect(runCliJson(repo, ["layer", "delete", id]).code).toBe(0);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+});
