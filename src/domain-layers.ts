@@ -262,14 +262,25 @@ export async function layerStatus(repo: Repo, selector: string): Promise<LayerIn
   };
 }
 
+const STATUS_CONCURRENCY = Math.max(1, Number(process.env.JVCLI_STATUS_CONCURRENCY ?? 8));
+
+async function mapLimit<T, R>(items: ReadonlyArray<T>, limit: number, fn: (item: T) => Promise<R>): Promise<Array<R>> {
+  const out: Array<R> = new Array(items.length);
+  let next = 0;
+  const workers = new Array(Math.min(limit, items.length)).fill(null).map(async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 export async function listLayers(repo: Repo): Promise<ReadonlyArray<LayerInfo>> {
   const refs = await loadRefs(repo.metaDir);
-  const out: Array<LayerInfo> = [];
-  for (const l of Object.values(refs.layers)) {
-    if (l.state === "deleted") continue;
-    out.push(await layerStatus(repo, l.id));
-  }
-  return out;
+  const live = Object.values(refs.layers).filter((l) => l.state !== "deleted");
+  return mapLimit(live, STATUS_CONCURRENCY, (l) => layerStatus(repo, l.id));
 }
 
 export async function cloneLayer(repo: Repo, selector: string, name?: string, checkpoint?: string): Promise<{ ref: LayerRef; workspace: string }> {

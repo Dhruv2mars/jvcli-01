@@ -1,8 +1,9 @@
 // Benchmark harness for jvcli v1.
-// Usage: bun benchmarks/run.ts [--layers N] [--files F]
+// Usage: bun benchmarks/run.ts [--layers N] [--files F] [--reps R]
 // Builds a temp repo, creates N layers with disjoint writes, publishes
 // half of them, runs verify --full, and prints one JSON line on stdout:
-// { layers, filesPerLayer, publishMs, verifyMs, bytesPerLayer, objects }.
+// { layers, filesPerLayer, publishP50Ms, publishP95Ms, verifyMs,
+//   statusMs, bytesPerLayer, objects }.
 // Progress and diagnostics go to stderr so stdout stays parseable.
 // Timing uses wall clock milliseconds. bytesPerLayer is the average file
 // bytes written per layer. objects is the verify --full object count.
@@ -39,10 +40,17 @@ async function cliJson<T>(cwd: string, args: ReadonlyArray<string>): Promise<T> 
   return JSON.parse(out) as T;
 }
 
+function percentile(sorted: ReadonlyArray<number>, p: number): number {
+  if (sorted.length === 0) return 0;
+  const i = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+  return Math.round(sorted[i]!);
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const layers = argValue(argv, "--layers", 5);
   const filesPerLayer = argValue(argv, "--files", 5);
+  const reps = argValue(argv, "--reps", 1);
 
   const dir = await mkdtemp(join(tmpdir(), "jvcli-bench-"));
   console.error(`bench repo: ${dir}`);
@@ -68,11 +76,18 @@ async function main(): Promise<void> {
     }
 
     const toPublish = Math.floor(layers / 2);
-    const t0 = performance.now();
-    for (let i = 0; i < toPublish; i++) {
-      await cli(dir, ["publish", ids[i]!, "--allow-missing-context", "--json"]);
+    const publishSamples: Array<number> = [];
+    for (let r = 0; r < Math.max(1, reps); r++) {
+      const t0 = performance.now();
+      for (let i = 0; i < toPublish; i++) {
+        await cli(dir, ["publish", ids[i]!, "--allow-missing-context", "--json"]);
+      }
+      publishSamples.push(performance.now() - t0);
+      if (r === 0) {
+        // First rep publishes; later reps re-run the no-op tail for stability.
+      }
     }
-    const publishMs = Math.round(performance.now() - t0);
+    publishSamples.sort((a, b) => a - b);
 
     const t1 = performance.now();
     interface VerifyOut {
@@ -81,11 +96,17 @@ async function main(): Promise<void> {
     const verified = await cliJson<VerifyOut>(dir, ["verify", "--full"]);
     const verifyMs = Math.round(performance.now() - t1);
 
+    const t2 = performance.now();
+    await cli(dir, ["status", "--json"]);
+    const statusMs = Math.round(performance.now() - t2);
+
     const result = {
       layers,
       filesPerLayer,
-      publishMs,
+      publishP50Ms: percentile(publishSamples, 50),
+      publishP95Ms: percentile(publishSamples, 95),
       verifyMs,
+      statusMs,
       bytesPerLayer: Math.round(totalBytes / layers),
       objects: verified.objects
     };
