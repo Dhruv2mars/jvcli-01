@@ -113,10 +113,18 @@ Journal fault injection points (`.javelin/journal/<operationId>.json`):
   publish and refresh. Resolve in the workspace and retry as a new
   operation.
 
-To simulate a crash, run an operation, copy the journal entry at the state
-above, kill the process, then rerun `verify --full` and retry the command.
-A healthy repo verifies clean and the retry either completes or reports a
-deterministic conflict.
+To simulate a crash, set `JVCLI_FAULT` to a comma separated list of
+injection points: `publish:after-merge-durable` (merged tree journaled as
+`objects_durable`, before publication bytes exist),
+`publish:after-world-created` (publication plus world journaled as
+`world_created`), `publish:after-accepted`. The command fails
+with retryable `E_INTERRUPTED` at that boundary. Then rerun `verify --full`
+and retry the command with the same `--operation-id`. A healthy repo verifies
+clean and the retry either completes or reports a
+deterministic conflict. Retries reuse the journaled checkpoint and root after
+revalidating them against the recomputed merge, so post-crash workspace dirt
+never leaks into the recovered world. `tests/recovery.test.ts` covers all
+three points plus the stale-retry case.
 
 Conflict semantics: merges are three way over flattened path maps with a
 common anchor. Identical changes on both sides merge silently. Any path

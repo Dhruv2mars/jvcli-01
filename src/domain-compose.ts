@@ -46,6 +46,54 @@ async function materializeMerged(repo: Repo, ws: string, merged: { files: Map<st
   return rootId;
 }
 
+async function adoptJournalCheckpoint(repo: Repo, layerId: string, checkpoint: string): Promise<string> {
+  const cp = decodeCheckpoint(await repo.store.readChecked(checkpoint, 4));
+  if (cp.layerId !== layerId) throw fail(CODES.corruptObject, "journal checkpoint belongs to another layer", { layerId });
+  const refs = await loadRefs(repo.metaDir);
+  const ref = refs.layers[layerId];
+  if (ref === undefined) throw fail(CODES.layerNotFound, "no such layer", { layerId });
+  if (ref.checkpoint === checkpoint) return checkpoint;
+  if (ref.state !== "active") throw fail(CODES.busy, "layer changed during publish; retry", { layerId, retryable: true });
+  const next = structuredClone(refs);
+  next.layers[layerId] = { ...ref, checkpoint };
+  const { casRefs } = await import("./core/refs.js");
+  const swapped = await casRefs(repo.metaDir, refs, next);
+  if (!swapped) throw fail(CODES.busy, "layer changed during publish; retry", { layerId, retryable: true });
+  await materializeFromRoot(repo, layerWorkspaceDir(repo, layerId), cp.rootId, layerId);
+  return checkpoint;
+}
+
+async function treeMatchesMerge(
+  repo: Repo,
+  rootId: string,
+  merged: { files: Map<string, string>; symlinks: Map<string, string> }
+): Promise<boolean> {
+  try {
+    const flat = await flattenRoot(repo.store, rootId);
+    if (flat.files.size !== merged.files.size || flat.symlinks.size !== merged.symlinks.size) return false;
+    for (const [path, blob] of merged.files) {
+      if (flat.files.get(path) !== blob) return false;
+    }
+    for (const [path, target] of merged.symlinks) {
+      if (flat.symlinks.get(path) !== target) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function faultPoint(name: string): boolean {
+  const raw = (process.env.JVCLI_FAULT ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return raw.includes(name);
+}
+
+async function crashIf(name: string): Promise<never | void> {
+  if (faultPoint(name)) {
+    throw fail(CODES.interrupted, `fault injected at ${name}`, { retryable: true, hint: "retry the operation" });
+  }
+}
+
 export async function publishLayer(repo: Repo, selector: string, opts: PublishOptions): Promise<PublishResult> {
   const refs0 = await loadRefs(repo.metaDir);
   const ref0 = resolveLayerRef(refs0, selector);
@@ -71,10 +119,16 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
       updatedAt: new Date().toISOString()
     });
   }
-  const cpId = await flushLayer(repo, ref0.id);
+  const journaled = existing !== null && existing.kind === "publish"
+    ? (existing.payload as { checkpoint?: string; root?: string; worldId?: string })
+    : null;
+  const cpId = journaled?.checkpoint !== undefined && journaled.checkpoint !== ""
+    ? await adoptJournalCheckpoint(repo, ref0.id, journaled.checkpoint)
+    : await flushLayer(repo, ref0.id);
   const refs = await loadRefs(repo.metaDir);
   const ref = refs.layers[ref0.id]!;
   const cp = decodeCheckpoint(await repo.store.readChecked(cpId, 4));
+  const journaledRoot = journaled?.root !== undefined && journaled.root !== "" ? journaled.root : null;
   const priorId = await currentWorldId(repo);
   const prior = decodeWorldVersion(await repo.store.readChecked(priorId, 3));
   const ctx = await layerContextStatus(repo, ref.id);
@@ -106,8 +160,26 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
   }
   const merged = verdict.merged;
   const exec = new Map([...merged.files.keys()].map((path) => [path, execOf(path)] as const));
-  const finalRoot = await materializeMerged(repo, layerWorkspaceDir(repo, ref.id), { files: new Map(merged.files), symlinks: new Map(merged.symlinks) }, exec);
-  await updateJournal(repo.metaDir, operationId, { state: "objects_durable", payload: { checkpoint: cpId, root: finalRoot } });
+  let finalRoot = journaledRoot;
+  let needsMaterialize = true;
+  if (finalRoot !== null) {
+    const sameCheckpoint = journaled?.checkpoint === cpId;
+    const samePrior = (journaled as { prior?: string } | null) !== null
+      && (journaled as unknown as { prior?: string }).prior === priorId;
+    const matchesMerge = await treeMatchesMerge(repo, finalRoot, merged);
+    if (!sameCheckpoint || !samePrior || !matchesMerge) {
+      finalRoot = null;
+    } else {
+      needsMaterialize = false;
+    }
+  }
+  if (finalRoot === null) {
+    finalRoot = await materializeMerged(repo, layerWorkspaceDir(repo, ref.id), { files: new Map(merged.files), symlinks: new Map(merged.symlinks) }, exec);
+    await updateJournal(repo.metaDir, operationId, { state: "objects_durable", payload: { checkpoint: cpId, prior: priorId, root: finalRoot } });
+  } else if (needsMaterialize) {
+    await materializeMerged(repo, layerWorkspaceDir(repo, ref.id), { files: new Map(merged.files), symlinks: new Map(merged.symlinks) }, exec);
+  }
+  await crashIf("publish:after-merge-durable");
   const contextIds = await collectLayerContexts(repo, [ref.id]);
   const pubBytes = encodePublication({
     layerId: ref.id,
@@ -131,6 +203,8 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
     contextIds
   });
   const worldId = await repo.store.put(worldBytes);
+  await updateJournal(repo.metaDir, operationId, { state: "world_created", payload: { checkpoint: cpId, prior: priorId, root: finalRoot, publication: pubId, world: worldId } });
+  await crashIf("publish:after-world-created");
   const snapshot = await loadRefs(repo.metaDir);
   const cur2 = await loadRefs(repo.metaDir);
   const still = cur2.layers[ref.id]!;
@@ -156,6 +230,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
   const ok = await casRefs(repo.metaDir, snapshot, swapped);
   if (!ok) throw fail(CODES.busy, "concurrent publish; retry", { layerId: ref.id, operationId, retryable: true });
   await updateJournal(repo.metaDir, operationId, { state: "accepted", payload: { worldId } });
+  await crashIf("publish:after-accepted");
   await updateJournal(repo.metaDir, operationId, { state: "finalized", payload: { worldId } });
   return { seq: prior.seq + 1, worldId, status: "published", operationId };
 }

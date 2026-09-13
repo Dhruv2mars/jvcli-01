@@ -235,3 +235,107 @@ describe("delete safety", () => {
     }
   });
 });
+
+describe("fault injection (JVCLI_FAULT)", () => {
+  test("crash after merge-durable retries into the same world", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "FI1");
+      writeWs(repo, a.id, "fi.txt", "fault\n");
+      const op = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+      const crashed = runCliJson(repo, ["publish", a.id, "--operation-id", op], { JVCLI_FAULT: "publish:after-merge-durable" });
+      expect(crashed.code).not.toBe(0);
+      expect(crashed.json.error.code).toBe("E_INTERRUPTED");
+      expect(crashed.json.error.retryable).toBe(true);
+      const { readFileSync } = require("node:fs") as typeof import("node:fs");
+      const { join } = require("node:path") as typeof import("node:path");
+      const entry = JSON.parse(readFileSync(join(repo, ".javelin", "journal", `${op}.json`), "utf8"));
+      expect(entry.state).toBe("objects_durable");
+      expect(typeof entry.payload.checkpoint).toBe("string");
+      expect(typeof entry.payload.root).toBe("string");
+      expect(runCliJson(repo, ["verify", "--full"]).code).toBe(0);
+      const retry = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
+      expect(retry.code).toBe(0);
+      expect(retry.json.seq).toBe(2);
+      const again = runCliJson(repo, ["history", "--world"]);
+      expect((again.json.worlds as Array<any>)).toHaveLength(2);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("crash after world-created retries without duplicating the version", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "FI2");
+      writeWs(repo, a.id, "fi.txt", "fault\n");
+      const op = "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2";
+      const crashed = runCliJson(repo, ["publish", a.id, "--operation-id", op], { JVCLI_FAULT: "publish:after-world-created" });
+      expect(crashed.code).not.toBe(0);
+      expect(crashed.json.error.code).toBe("E_INTERRUPTED");
+      const { readFileSync } = require("node:fs") as typeof import("node:fs");
+      const { join } = require("node:path") as typeof import("node:path");
+      const entry = JSON.parse(readFileSync(join(repo, ".javelin", "journal", `${op}.json`), "utf8"));
+      expect(entry.state).toBe("world_created");
+      expect(typeof entry.payload.world).toBe("string");
+      expect(runCliJson(repo, ["verify", "--full"]).code).toBe(0);
+      const retry = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
+      expect(retry.code).toBe(0);
+      expect(retry.json.seq).toBe(2);
+      expect((runCliJson(repo, ["history", "--world"]).json.worlds as Array<any>)).toHaveLength(2);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("stale retry reuses the journaled checkpoint and root instead of re-merging dirt", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "FI4");
+      const b = createLayer(repo, "FI5");
+      writeWs(repo, a.id, "stale.txt", "stale-work\n");
+      writeWs(repo, b.id, "bump.txt", "bump\n");
+      const op = "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4";
+      const crashed = runCliJson(repo, ["publish", a.id, "--operation-id", op], { JVCLI_FAULT: "publish:after-merge-durable" });
+      expect(crashed.code).not.toBe(0);
+      expect(runCliJson(repo, ["publish", b.id]).code).toBe(0);
+      writeWs(repo, a.id, "post-crash.txt", "must-not-publish\n");
+      const retry = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
+      expect(retry.code).toBe(0);
+      const diff = runCliJson(repo, ["diff", "v2", "v3"]);
+      expect(JSON.stringify(diff.json.changes)).not.toContain("post-crash.txt");
+      expect(JSON.stringify(diff.json.changes)).toContain("stale.txt");
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  test("crash after accepted recovers the existing world on retry", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const a = createLayer(repo, "FI3");
+      writeWs(repo, a.id, "fi.txt", "fault\n");
+      const op = "f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3";
+      const crashed = runCliJson(repo, ["publish", a.id, "--operation-id", op], { JVCLI_FAULT: "publish:after-accepted" });
+      expect(crashed.code).not.toBe(0);
+      expect(crashed.json.error.code).toBe("E_INTERRUPTED");
+      expect(runCliJson(repo, ["verify", "--full"]).code).toBe(0);
+      const retry = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
+      expect(retry.code).toBe(0);
+      expect(retry.json.status).toBe("recovered");
+      expect(retry.json.seq).toBe(2);
+      const { readFileSync } = require("node:fs") as typeof import("node:fs");
+      const { join } = require("node:path") as typeof import("node:path");
+      const entry = JSON.parse(readFileSync(join(repo, ".javelin", "journal", `${op}.json`), "utf8"));
+      expect(entry.state).toBe("accepted");
+      expect(retry.json.world).toBe(entry.payload.worldId);
+      expect((runCliJson(repo, ["history", "--world"]).json.worlds as Array<any>)).toHaveLength(2);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+});

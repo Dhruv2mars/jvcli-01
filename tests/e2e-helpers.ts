@@ -24,8 +24,8 @@ export interface CliJsonResult extends CliResult {
 }
 
 /** Spawn `node <CLI_PATH> ...args` with cwd set to the repo dir. */
-export function runCli(repoDir: string, args: ReadonlyArray<string>): CliResult {
-  const r = spawnSync("node", [CLI_PATH, ...args], { cwd: repoDir, encoding: "utf8" });
+export function runCli(repoDir: string, args: ReadonlyArray<string>, env?: Record<string, string>): CliResult {
+  const r = spawnSync("node", [CLI_PATH, ...args], { cwd: repoDir, encoding: "utf8", env: { ...process.env, ...(env ?? {}) } });
   return {
     code: r.status ?? 1,
     stdout: typeof r.stdout === "string" ? r.stdout : String(r.stdout ?? ""),
@@ -34,9 +34,9 @@ export function runCli(repoDir: string, args: ReadonlyArray<string>): CliResult 
 }
 
 /** Like runCli but appends `--json` (unless already present) and parses stdout. */
-export function runCliJson(repoDir: string, args: ReadonlyArray<string>): CliJsonResult {
+export function runCliJson(repoDir: string, args: ReadonlyArray<string>, env?: Record<string, string>): CliJsonResult {
   const withJson = args.includes("--json") ? [...args] : [...args, "--json"];
-  const r = runCli(repoDir, withJson);
+  const r = runCli(repoDir, withJson, env);
   let json: any = null;
   try {
     json = JSON.parse(r.stdout);
