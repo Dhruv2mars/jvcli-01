@@ -200,8 +200,11 @@ Exit codes: `1` outside a repository.
 Usage: `jvcli diagnostics bundle [--output <path>]`
 
 Prints a small JSON bundle (`version`, `repo`, `world`, layer and world
-counts, `platform`, `node`). With `--output <path>` it also writes the bundle
+counts, per-state layer counts, stale layer count, journal counts by state
+plus operation ids, a non-full verify summary, `platform`, `node`). With
+`--output <path>` it also writes the bundle
 to that file and reports the resolved `output` path. Stdout is always JSON.
+File bytes and context payloads are never included.
 
 Example:
 
@@ -209,7 +212,7 @@ Example:
 jvcli diagnostics bundle --output /tmp/jvdiag.json
 ```
 
-JSON shape: `{ ok, version: 1, repo, world: { seq, id }, layers, worlds, platform, node[, output] }`.
+JSON shape: `{ ok, version: 1, repo, world: { seq, id }, layers, layerStates, staleLayers, worlds, journals: { total, byState, operationIds }, verify: { ok, worlds, layers, objects }, platform, node[, output] }`.
 Exit codes: `1` for anything other than the `bundle` subcommand.
 
 ## layer create
