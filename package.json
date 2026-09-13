@@ -1,0 +1,39 @@
+{
+  "name": "jvcli-01",
+  "version": "0.1.0",
+  "description": "Javelin CLI. Local agent-native version control: one World, isolated Layers, automatic checkpoints, native agent context, Stack, atomic Publish.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "jvcli-01": "dist/cli-entry.js",
+    "jvcli": "dist/cli-entry.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22.5",
+    "bun": ">=1.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "dev": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "bench": "bun benchmarks/run.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0",
+    "effect": "^3.22.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.2"
+  }
+}

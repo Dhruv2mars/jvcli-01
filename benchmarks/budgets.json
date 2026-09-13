@@ -1,0 +1,16 @@
+{
+  "_note": "PLACEHOLDER baselines. Measure on release machine before enforcing. Do not treat these numbers as real until remeasured.",
+  "machine": "measure on release machine",
+  "workload": { "layers": 5, "filesPerLayer": 5 },
+  "baselines": {
+    "publishMs": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" },
+    "verifyMs": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" },
+    "bytesPerLayer": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" },
+    "objects": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" }
+  },
+  "regression": {
+    "metric": "publishMs.p50",
+    "threshold": 1.2,
+    "rule": "fail if publish p50 regresses more than 20 percent versus budgets.json"
+  }
+}

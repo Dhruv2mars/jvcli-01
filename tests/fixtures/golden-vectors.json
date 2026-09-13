@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "description": "Canonical CBOR bytes (hex) + BLAKE3-256 object ids for semantic-core golden vectors.",
+  "vectors": [
+    {
+      "name": "empty-blob",
+      "type": 1,
+      "bytesHex": "83010140",
+      "id": "d3b3f51620d403496c828f9fa94a44e052475f386f72d1204edb2bbfed8b18dc"
+    },
+    {
+      "name": "hello-blob",
+      "type": 1,
+      "bytesHex": "8301014568656c6c6f",
+      "id": "e6d2fdc2553345d0d0ea5b0b5f00f9014eb297e09b3072814fb117d2d64c1729"
+    },
+    {
+      "name": "empty-tree",
+      "type": 2,
+      "bytesHex": "83020180",
+      "id": "bbf2d714bfb7386c4dc40c3fbd9b0fe57185bf2cf3d41d1d0234d976ac618613"
+    },
+    {
+      "name": "one-file-tree",
+      "type": 2,
+      "bytesHex": "83020181846968656c6c6f2e747874015820e6d2fdc2553345d0d0ea5b0b5f00f9014eb297e09b3072814fb117d2d64c1729f4",
+      "id": "9ed8d1011e745b27054e590da16b1c03c36a82280be0550298ee03c701d27234"
+    },
+    {
+      "name": "world-sample",
+      "type": 3,
+      "bytesHex": "830301865000000000000000000000000000000000075820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbf6825820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc5820dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "id": "224573c09f65967c84270d0f4bcc472f6eb38e4530e52c24a3a337bca72a45ae"
+    },
+    {
+      "name": "checkpoint-sample",
+      "type": 4,
+      "bytesHex": "83040187501111111111111111111111111111111182015820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb5820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc5820ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddf6815820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "id": "11b2533e6a9099efa2ee6accfd636bb4602c0334a2875b1a315fc43f25f4eaae"
+    },
+    {
+      "name": "context-object-sample",
+      "type": 5,
+      "bytesHex": "83050184626d64646e6f746503496374782d6279746573",
+      "id": "e8e0904cb04664175c9ce40a8caa255701a6b4433ee8ac91aa02d3bb80ea5635"
+    },
+    {
+      "name": "context-manifest-sample",
+      "type": 6,
+      "bytesHex": "83060187500000000000000000000000000000000050111111111111111111111111111111115022222222222222222222222222222222f6825820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0282820004820a0c",
+      "id": "0c1a166273ef8a10811240e26b43d9a0d986c1411fca0ea4fe782dc8d325f4ac"
+    },
+    {
+      "name": "publication-sample",
+      "type": 7,
+      "bytesHex": "8307018a50111111111111111111111111111111115820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb5820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc5820dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd09815820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa676167656e742d31f45033333333333333333333333333333333",
+      "id": "c993f62561b1c6f111c21298746c79059f5ffba3c65b22c25acd63433b37bc84"
+    },
+    {
+      "name": "refresh-sample",
+      "type": 8,
+      "bytesHex": "8308018650111111111111111111111111111111115820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb5820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc5820dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd5033333333333333333333333333333333",
+      "id": "fdaccd4e01185ef9d033a46f2e660709d3380c3b1f24fac0c539f9f88e02a416"
+    },
+    {
+      "name": "stack-sample",
+      "type": 9,
+      "bytesHex": "83090187828350111111111111111111111111111111115820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb8350555555555555555555555555555555555820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc5820dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd5820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa50666666666666666666666666666666665820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb8250111111111111111111111111111111115055555555555555555555555555555555815820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc5033333333333333333333333333333333",
+      "id": "9108e70af701a224510424816e68d4adcf6256bc26b2c79084ce31396fd0abee"
+    }
+  ]
+}
