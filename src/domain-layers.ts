@@ -324,7 +324,7 @@ export async function deleteLayer(repo: Repo, selector: string): Promise<void> {
   const ref = resolveLayerRef(refs, selector);
   if (ref.state === "deleted") return;
   for (const entry of await listJournals(repo.metaDir)) {
-    if (entry.state === "finalized" || entry.state === "conflict") continue;
+    if (entry.state === "finalized" || entry.state === "accepted" || entry.state === "conflict") continue;
     const cites = entry.layerId === ref.id || JSON.stringify(entry.payload).includes(ref.id) || JSON.stringify(entry.payload).includes(ref.checkpoint);
     if (cites) {
       throw fail(CODES.busy, `layer ${ref.id} has a live ${entry.kind} operation ${entry.operationId}; retry after it settles`, {
@@ -346,14 +346,24 @@ export async function deleteLayer(repo: Repo, selector: string): Promise<void> {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
+  let flushed = ref.checkpoint;
   if (ref.state === "active" && ref.workspace !== null) {
-    await flushLayer(repo, ref.id);
+    flushed = await flushLayer(repo, ref.id);
   }
   const cur = await loadRefs(repo.metaDir);
   const live = cur.layers[ref.id];
   if (live === undefined || live.state === "deleted") {
     await updateJournal(repo.metaDir, opId, { state: "finalized" });
     return;
+  }
+  if (live.state !== ref.state || (live.checkpoint !== ref.checkpoint && live.checkpoint !== flushed)) {
+    await updateJournal(repo.metaDir, opId, { state: "finalized" });
+    throw fail(CODES.busy, `layer ${ref.id} changed during delete; retry`, {
+      layerId: ref.id,
+      operationId: opId,
+      retryable: true,
+      hint: "a concurrent operation touched the layer; retry the delete"
+    });
   }
   const next = structuredClone(cur);
   next.layers[ref.id] = { ...live, state: "deleted", workspace: null, deletedAt: new Date().toISOString(), deleteOp: opId };
