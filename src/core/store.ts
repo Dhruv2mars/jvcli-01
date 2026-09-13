@@ -60,7 +60,9 @@ export class ObjectStore {
         // the atomic write path, whose existence check decides the outcome
       }
     }
-    const tmp = join(this.dir, "..", "tmp", `obj-${id}-${process.pid}-${Date.now()}`);
+    const tmpDir = join(this.dir, "..", "tmp");
+    await this.sweepTmp(tmpDir);
+    const tmp = join(tmpDir, `obj-${id}-${process.pid}-${Date.now()}`);
     await mkdir(dirname(tmp), { recursive: true });
     await mkdir(dirname(final), { recursive: true });
     await writeFile(tmp, bytes);
@@ -86,6 +88,30 @@ export class ObjectStore {
       }
     }
     return id;
+  }
+
+  private swept = false;
+
+  private async sweepTmp(tmpDir: string): Promise<void> {
+    if (this.swept) return;
+    this.swept = true;
+    try {
+      const { readdir, stat } = await import("node:fs/promises");
+      const files = await readdir(tmpDir);
+      const cutoff = Date.now() - 60_000;
+      for (const f of files) {
+        if (!f.startsWith("obj-")) continue;
+        const full = join(tmpDir, f);
+        try {
+          const st = await stat(full);
+          if (st.mtimeMs < cutoff) await rm(full, { force: true });
+        } catch {
+          // racing writer owns it; leave it alone
+        }
+      }
+    } catch {
+      // no tmp dir yet; nothing orphaned
+    }
   }
 
   async verifyOne(id: string): Promise<void> {

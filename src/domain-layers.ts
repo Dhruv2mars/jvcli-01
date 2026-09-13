@@ -485,7 +485,10 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
   const latest = await loadRefs(repo.metaDir);
   const nl = structuredClone(latest);
   nl.layers[ref.id] = { ...live, checkpoint: freshId };
-  await saveRefs(repo.metaDir, nl);
+  const swapped = await casRefs(repo.metaDir, latest, nl);
+  if (!swapped) {
+    throw fail(CODES.busy, "layer changed during refresh; retry", { layerId: ref.id, operationId: opId, retryable: true });
+  }
   await updateJournal(repo.metaDir, opId, { state: "finalized" });
   await materializeFromRoot(repo, layerWorkspaceDir(repo, ref.id), rootId, ref.id);
   return { checkpoint: freshId, adopted: cur.seq, conflicts: [] };

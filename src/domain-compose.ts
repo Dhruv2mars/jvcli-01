@@ -101,6 +101,9 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
   const existing = await readJournal(repo.metaDir, operationId);
   if (existing !== null) {
     if (existing.kind !== "publish") throw fail(CODES.io, "operation id belongs to another op", { operationId });
+    if (existing.layerId !== undefined && existing.layerId !== ref0.id) {
+      throw fail(CODES.io, `operation id ${operationId} belongs to layer ${existing.layerId}`, { layerId: ref0.id, operationId });
+    }
     if (existing.state === "finalized" || existing.state === "accepted") {
       const wid = (existing.payload as { worldId: string }).worldId;
       const wbytes = await repo.store.readChecked(wid, 3);
@@ -136,6 +139,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
     throw fail(CODES.missingContext, "agent context missing or incomplete; re-run with --allow-missing-context to override", {
       layerId: ref.id,
       operationId,
+      retryable: true,
       hint: "jvcli context status --layer <id>"
     });
   }
@@ -220,7 +224,7 @@ export async function publishLayer(repo: Repo, selector: string, opts: PublishOp
       await updateJournal(repo.metaDir, operationId, { state: "conflict", payload: { conflicts: re.conflicts } });
       return { seq: freshPrior.seq, worldId: currentNow, status: "conflict", conflicts: re.conflicts, operationId };
     }
-    await updateJournal(repo.metaDir, operationId, { state: "conflict", payload: { retry: true } });
+    await updateJournal(repo.metaDir, operationId, { state: "stale-retry", payload: { checkpoint: cpId, prior: currentNow } });
     throw fail(CODES.stale, "world advanced during publish; retry", { layerId: ref.id, operationId, retryable: true });
   }
   const next = structuredClone(snapshot);
@@ -245,6 +249,16 @@ export interface StackResult {
 export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, name: string | undefined, operationId?: string): Promise<StackResult> {
   if (selectors.length < 2) throw fail(CODES.invalidPath, "stack needs at least two layers");
   const opId = (operationId ?? newId16()).toLowerCase();
+  const stacked = await readJournal(repo.metaDir, opId);
+  if (stacked !== null) {
+    if (stacked.kind !== "stack") throw fail(CODES.io, "operation id belongs to another op", { operationId: opId });
+    if (stacked.state === "finalized") {
+      const destId = (stacked.payload as { dest: string }).dest;
+      const destRef = (await loadRefs(repo.metaDir)).layers[destId];
+      if (destRef === undefined) throw fail(CODES.corruptObject, `stack destination missing: ${destId}`, { operationId: opId });
+      return { destId, workspace: destRef.workspace ?? layerWorkspaceDir(repo, destId), operationId: opId, order: (stacked.payload as { order?: ReadonlyArray<string> }).order ?? [] };
+    }
+  }
   const refs0 = await loadRefs(repo.metaDir);
   const sources = selectors.map((s) => resolveLayerRef(refs0, s));
   for (const s of sources) {
@@ -358,7 +372,7 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   }
   const ok = await casRefs(repo.metaDir, snapshot, next);
   if (!ok) throw fail(CODES.busy, "concurrent stack; retry", { operationId: opId, retryable: true });
-  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId } });
+  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId, order } });
   await materializeFromRoot(repo, ws, builtRoot, destId);
   return { destId, workspace: ws, operationId: opId, order };
 }

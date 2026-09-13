@@ -53,13 +53,19 @@ describe("recovery / gc / verify flows", () => {
       expect(first.json.seq).toBe(2);
       const world = first.json.world as string;
 
-      // Retry the same operation-id from another active layer: journal
-      // recovery returns the same world without appending a version.
-      const b = createLayer(repo, "OPB");
-      writeWs(repo, b.id, "other.txt", "other\n");
-      const second = runCliJson(repo, ["publish", b.id, "--operation-id", op]);
+      // Same operation id retried from the same layer recovers the world.
+      const second = runCliJson(repo, ["publish", a.id, "--operation-id", op]);
       expect(second.code).toBe(0);
       expect(second.json.world).toBe(world);
+      expect(second.json.status).toBe("recovered");
+
+      // Same operation id from a different layer is rejected: it belongs
+      // to the first layer, not a free retry token.
+      const b = createLayer(repo, "OPB");
+      writeWs(repo, b.id, "other.txt", "other\n");
+      const third = runCliJson(repo, ["publish", b.id, "--operation-id", op]);
+      expect(third.code).not.toBe(0);
+      expect(third.json.error.code).toBe("E_IO");
 
       const hist = runCliJson(repo, ["history", "--world"]);
       expect(hist.code).toBe(0);

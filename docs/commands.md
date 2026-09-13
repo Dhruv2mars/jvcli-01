@@ -12,10 +12,10 @@ directory search finds `.javelin/repo.json`. Repo discovery is in `src/locate.ts
 lines show `[--json]` on every command except `init` and
 `diagnostics bundle`, but `src/cli.ts` honors `--json` on `init` too, so
 `jvcli init --json` works despite the omission in `--help`. For
-`diagnostics bundle`, behavior is special: without `--output` stdout is
-always the JSON bundle; with `--output <path>`, stdout is human
-(`bundle: <path>`) unless `--json` is also passed. For `show` of a blob,
-stdout is the raw blob bytes with or without `--json` (see `show`).
+`diagnostics bundle`, behavior is special: stdout is always the JSON bundle
+whether or not `--output <path>` is passed; with `--output` the same bundle
+is also written to that file and the JSON gains an `output` path. For `show`
+of a blob, stdout is the raw blob bytes with or without `--json` (see `show`).
 
 Layer selectors accept a full id, a unique id prefix, or a unique layer name
 (see `resolveLayerRef` in `src/core/refs.ts`).
@@ -78,6 +78,14 @@ jvcli init my-repo
 
 JSON shape: `{ ok, repo, root, world, seq: 1, files, warnings }`.
 `warnings` lists skipped symlinks or special files.
+Portable path policy: names are NFC UTF-8, components cap at 255 bytes,
+paths at 4096 bytes, trailing dots and spaces rejected, control characters
+rejected, Windows reserved stems (`AUX`, `COM1`, and kin, with or without an
+extension) rejected, case-fold collisions rejected, `.javelin` reserved. A
+file that violates the policy fails the whole scan with `E_INVALID_PATH`,
+so a directory containing `aux.txt` or `readme.` cannot initialize on any
+platform. This is the spec section 8.1 rule, kept so hashes match across
+macOS, Linux, and Windows.
 Exit codes: `1` if the target is not a directory or already a repository.
 
 ## status
@@ -203,7 +211,8 @@ Prints a small JSON bundle (`version`, `repo`, `world`, layer and world
 counts, per-state layer counts, stale layer count, journal counts by state
 plus operation ids, a non-full verify summary, `platform`, `node`). With
 `--output <path>` it also writes the bundle
-to that file and reports the resolved `output` path. Stdout is always JSON.
+to that file and reports the resolved `output` path inside the JSON. Stdout is
+always JSON, with or without `--output`.
 File bytes and context payloads are never included.
 
 Example:
@@ -382,13 +391,13 @@ Exit codes: `1` for unknown layers.
 
 ## stack
 
-Usage: `jvcli stack <layer>... [--into <name>] [--json]`
+Usage: `jvcli stack <layer>... [--into <name>] [--operation-id <id>] [--json]`
 
 Merges two or more active layers onto the current world in deterministic
 (sorted layer id) order, writes a stack record, creates a new active layer
-holding the result, and marks sources `consumed`. The CLI passes one
-operation id; sources and destination are recorded in the stack object and
-the journal payload. Any normalization or merge
+holding the result, and marks sources `consumed`. `--operation-id <id>` makes
+the stack resumable: a repeated call with a finalized id returns the same
+destination instead of stacking twice. Any normalization or merge
 conflict throws `E_CONFLICT` with `paths` and a retry hint.
 
 Example:
@@ -410,8 +419,10 @@ world, and atomically advances the world on success. Without
 `--allow-missing-context`, incomplete context throws `E_MISSING_CONTEXT` with
 hint `jvcli context status --layer <id>`. `--operation-id <id>` makes the
 operation resumable: a repeated call with an accepted or finalized id returns
-`status: "recovered"`. Conflicts throw `E_CONFLICT` with `paths`. A world that
-advanced mid-publish throws retryable `E_STALE`.
+`status: "recovered"`. The id is bound to its layer, so retrying it from a
+different layer fails with `E_IO`. Conflicts throw `E_CONFLICT` with `paths`.
+A world that advanced mid-publish throws retryable `E_STALE` (exit `2`, no
+conflicting paths: re-resolve and retry the same operation id).
 
 Example:
 

@@ -111,6 +111,7 @@ export function resolveLayerRef(refs: Refs, selector: string): LayerRef {
   if (byName.length > 1) throw fail(CODES.ambiguousLayer, `ambiguous layer name: ${selector}`);
   const byPrefix = Object.values(refs.layers).filter((l) => l.id.startsWith(sel) && l.state !== "deleted");
   if (byPrefix.length === 1) return byPrefix[0]!;
+  if (byPrefix.length > 1) throw fail(CODES.ambiguousLayer, `ambiguous layer prefix: ${selector}`);
   throw fail(CODES.layerNotFound, `no such layer: ${selector}`);
 }
 
