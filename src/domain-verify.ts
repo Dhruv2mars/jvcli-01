@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { decodeTree } from "./core/cbor.js";
 import { decodeCheckpoint, decodeContextManifest, decodeWorldVersion, decodePublication, decodeRefresh, decodeStack } from "./core/objects.js";
 import { unwrapObject } from "./core/cbor.js";
-import { loadRefs } from "./core/refs.js";
+import { listJournals, loadRefs } from "./core/refs.js";
 import { CODES, fail } from "./core/types.js";
 import { flattenRoot, openRepo } from "./core/repo.js";
 
@@ -148,16 +148,20 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
     queue.push({ id: l.checkpoint, type: 4 });
     for (const mid of Object.values(l.sessions)) queue.push({ id: mid, type: 6 });
   }
+  for (const entry of await listJournals(repo.metaDir)) {
+    if (entry.state === "finalized" || entry.state === "conflict") continue;
+    collectJournalRoots(entry, queue);
+  }
   while (queue.length > 0) {
     const item = queue.pop()!;
     if (reachable.has(item.id)) continue;
+    reachable.add(item.id);
     let bytes: Uint8Array;
     try {
       bytes = await repo.store.read(item.id);
     } catch {
       continue;
     }
-    reachable.add(item.id);
     const { type } = unwrapObject(bytes);
     try {
       if (type === 3) {
@@ -210,18 +214,44 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
     }
   }
   const all = await listObjects(repo);
-  let removed = 0;
-  if (!dryRun) {
-    for (const id of all) {
-      if (!reachable.has(id)) {
-        await rm(join(repo.metaDir, "objects", id.slice(0, 2), id.slice(2)), { force: true });
-        removed++;
+  const unreach = all.filter((id) => !reachable.has(id));
+  const quarantine = new Set<string>();
+  try {
+    const cutoff = Date.now() - 5_000;
+    const { statSync } = await import("node:fs");
+    for (const id of unreach) {
+      try {
+        const st = statSync(join(repo.metaDir, "objects", id.slice(0, 2), id.slice(2)));
+        if (st.mtimeMs >= cutoff) quarantine.add(id);
+      } catch {
+        // vanished between list and stat; treat as removed
       }
     }
+  } catch {
+    // stat unavailable; no quarantine
+  }
+  const eligible = unreach.filter((id) => !quarantine.has(id));
+  let removed = 0;
+  if (!dryRun) {
+    for (const id of eligible) {
+      await rm(join(repo.metaDir, "objects", id.slice(0, 2), id.slice(2)), { force: true });
+      removed++;
+    }
   } else {
-    removed = all.filter((id) => !reachable.has(id)).length;
+    removed = eligible.length;
   }
   return { reachable: reachable.size, total: all.length, removed, dryRun };
+}
+
+function collectJournalRoots(entry: { payload: unknown }, queue: Array<{ id: string; type?: number }>): void {
+  const ids = new Set<string>();
+  const walk = (value: unknown): void => {
+    if (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)) ids.add(value);
+    else if (Array.isArray(value)) for (const v of value) walk(v);
+    else if (value !== null && typeof value === "object") for (const v of Object.values(value as Record<string, unknown>)) walk(v);
+  };
+  walk(entry.payload);
+  for (const id of ids) queue.push({ id });
 }
 
 async function listObjects(repo: { metaDir: string }): Promise<ReadonlyArray<string>> {
