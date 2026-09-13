@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { IGNORE_FILE, ignoreMatch, JV_DIR, normalizePath, parseIgnoreFile, type IgnoreRule } from "./paths.js";
 
@@ -39,7 +39,6 @@ export async function scanDirectory(root: string): Promise<ScanResult> {
       const isDir = entry.isDirectory();
       if (ignoreMatch(rules, rel, isDir)) continue;
       if (entry.isSymbolicLink()) {
-        const { readlink } = await import("node:fs/promises");
         const target = await readlink(abs);
         const portable = target.replaceAll("\\", "/");
         if (portable.startsWith("/") || portable === ".." || portable.startsWith("../") || portable.includes("\0")) {
@@ -86,7 +85,6 @@ export async function materializeTree(
     } catch {
       // fresh path
     }
-    const { symlink } = await import("node:fs/promises");
     await symlink(target, abs);
   }
 }

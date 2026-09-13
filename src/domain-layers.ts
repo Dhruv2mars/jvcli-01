@@ -1,6 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
-import { encodeBlob, encodeTree, objectId } from "./core/cbor.js";
+import { mkdir, readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { newId16 } from "./core/ids.js";
 import {
   buildTreeFromFiles,
@@ -8,11 +7,11 @@ import {
   decodeWorldVersion,
   diffTrees,
   encodeCheckpoint,
-  flattenTree,
+  encodeRefresh,
   structuralCompatible,
   type Conflict
 } from "./core/objects.js";
-import { decodeTree } from "./core/cbor.js";
+import { hashTree, hydrate, readFlat, TreeStager } from "./core/tree-stage.js";
 import { normalizePath } from "./core/paths.js";
 import { appendJournal, loadRefs, readJournal, resolveLayerRef, saveRefs, updateJournal, type LayerRef } from "./core/refs.js";
 import { clearWorkspace, materializeTree, scanDirectory } from "./core/scan.js";
@@ -49,16 +48,8 @@ async function currentSeqOf(repo: Repo): Promise<{ seq: number; id: string }> {
   return { seq: decodeWorldVersion(bytes).seq, id };
 }
 
-function treeEntriesGetter(repo: Repo): (id: string) => { name: string; kind: "file" | "dir" | "symlink"; target: string }[] {
-  throw new Error("use async variant");
-}
-
-const syncCache = new WeakMap<object, Map<string, Uint8Array>>();
-
-export function putBlobSync(repo: Repo, content: Uint8Array): string {
-  const { encodeBlob: eb } = require("./core/cbor.js") as typeof import("./core/cbor.js");
-  void eb;
-  throw new Error("use async");
+export function putBlobSync(_repo: Repo, _content: Uint8Array): string {
+  throw new Error("putBlobSync is removed; use TreeStager from core/tree-stage.js");
 }
 
 export async function checkpointLayer(repo: Repo, layerId: string, recordId: string | null, contextIds: ReadonlyArray<string>): Promise<string> {
@@ -68,19 +59,9 @@ export async function checkpointLayer(repo: Repo, layerId: string, recordId: str
   if (ref.state !== "active" && ref.state !== "closed") throw fail(CODES.layerState, `layer is ${ref.state}`, { layerId });
   const ws = layerWorkspaceDir(repo, layerId);
   const scan = await scanDirectory(ws);
-  const pending = new Map<string, Uint8Array>();
-  const putBlob = (content: Uint8Array): string => {
-    const bytes = encodeBlob(content);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const putTree = (entries: ReadonlyArray<{ name: string; kind: "file" | "dir" | "symlink"; target: string; executable: boolean }>): string => {
-    const bytes = encodeTree(entries);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const { rootId } = buildTreeFromFiles(scan.files, scan.symlinks, { putBlob, putTree });
-  for (const bytes of pending.values()) await repo.store.put(bytes);
+  const stager = new TreeStager();
+  const { rootId } = buildTreeFromFiles(scan.files, scan.symlinks, stager);
+  await stager.flush(repo.store);
   const prevBytes = await repo.store.readChecked(ref.checkpoint, 4);
   const prev = decodeCheckpoint(prevBytes);
   const mergedCtx = [...new Set([...prev.contextIds, ...contextIds])].sort();
@@ -179,41 +160,11 @@ export async function createLayer(repo: Repo, opts: CreateLayerOptions): Promise
 }
 
 export async function materializeFromRoot(repo: Repo, ws: string, rootId: string): Promise<void> {
-  const flat = await flattenRoot(repo.store, rootId);
-  const files = new Map<string, { bytes: Uint8Array; executable: boolean }>();
-  for (const [p, blob] of flat.files) {
-    const bytes = await repo.store.readChecked(blob, 1);
-    const { unwrapObject } = await import("./core/cbor.js");
-    const { payload } = unwrapObject(bytes);
-    if (payload.tag !== "bytes") throw fail(CODES.corruptObject, "bad blob");
-    files.set(p, { bytes: payload.value, executable: false });
-  }
-  const { mkdir } = await import("node:fs/promises");
+  const flat = await readFlat(repo.store, rootId);
+  const files = await hydrate(repo.store, flat);
   await mkdir(ws, { recursive: true });
   await clearWorkspace(ws);
-  const { decodeTree: dt } = await import("./core/cbor.js");
-  void dt;
-  const execs = await executableMap(repo, rootId);
-  for (const [p, v] of files) {
-    const ex = execs.get(p) ?? false;
-    files.set(p, { bytes: v.bytes, executable: ex });
-  }
   await materializeTree(ws, files, flat.symlinks);
-}
-
-async function executableMap(repo: Repo, rootId: string): Promise<Map<string, boolean>> {
-  const out = new Map<string, boolean>();
-  const visit = async (id: string, prefix: string): Promise<void> => {
-    const bytes = await repo.store.readChecked(id, 2);
-    const entries = decodeTree(bytes);
-    for (const e of entries) {
-      const p = prefix === "" ? e.name : `${prefix}/${e.name}`;
-      if (e.kind === "file") out.set(p, e.executable);
-      else if (e.kind === "dir") await visit(e.target, p);
-    }
-  };
-  await visit(rootId, "");
-  return out;
 }
 
 export async function openLayer(repo: Repo, selector: string): Promise<{ ref: LayerRef; workspace: string }> {
@@ -230,7 +181,6 @@ export async function openLayer(repo: Repo, selector: string): Promise<{ ref: La
     await materializeFromRoot(repo, ws, decodeCheckpoint(await repo.store.readChecked(ref.checkpoint, 4)).rootId);
     return { ref: { ...ref, state: "active", workspace: ws }, workspace: ws };
   }
-  const { mkdir } = await import("node:fs/promises");
   await mkdir(ws, { recursive: true });
   return { ref, workspace: ws };
 }
@@ -254,20 +204,10 @@ export async function flushLayer(repo: Repo, selector: string): Promise<string> 
   const prev = decodeCheckpoint(before);
   const ws = layerWorkspaceDir(repo, ref.id);
   const scan = await scanDirectory(ws);
-  const pending = new Map<string, Uint8Array>();
-  const putBlob = (content: Uint8Array): string => {
-    const bytes = encodeBlob(content);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const putTree = (entries: ReadonlyArray<{ name: string; kind: "file" | "dir" | "symlink"; target: string; executable: boolean }>): string => {
-    const bytes = encodeTree(entries);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const { rootId } = buildTreeFromFiles(scan.files, scan.symlinks, { putBlob, putTree });
+  const stager = new TreeStager();
+  const { rootId } = buildTreeFromFiles(scan.files, scan.symlinks, stager);
   if (rootId === prev.rootId) return ref.checkpoint;
-  for (const bytes of pending.values()) await repo.store.put(bytes);
+  await stager.flush(repo.store);
   const cpBytes = encodeCheckpoint({
     layerId: ref.id,
     originKind: prev.originKind,
@@ -295,18 +235,7 @@ export async function layerStatus(repo: Repo, selector: string): Promise<LayerIn
   if (ref.state === "active" && ref.workspace !== null) {
     try {
       const scan = await scanDirectory(ref.workspace);
-      const pending2 = new Map<string, Uint8Array>();
-      const putBlob = (content: Uint8Array): string => {
-        const bytes = encodeBlob(content);
-        pending2.set(objectId(bytes), bytes);
-        return objectId(bytes);
-      };
-      const putTree = (entries: ReadonlyArray<{ name: string; kind: "file" | "dir" | "symlink"; target: string; executable: boolean }>): string => {
-        const bytes = encodeTree(entries);
-        pending2.set(objectId(bytes), bytes);
-        return objectId(bytes);
-      };
-      const { rootId: live } = buildTreeFromFiles(scan.files, scan.symlinks, { putBlob, putTree });
+      const live = hashTree(scan.files, scan.symlinks);
       dirty = live !== rootId;
       pendingCheckpoint = dirty;
     } catch {
@@ -391,8 +320,6 @@ export async function deleteLayer(repo: Repo, selector: string): Promise<void> {
   const refs = await loadRefs(repo.metaDir);
   const ref = resolveLayerRef(refs, selector);
   if (ref.state === "deleted") return;
-  const journals = await import("node:fs/promises").then((m) => m.readdir(join(repo.metaDir, "journal")).catch(() => [] as string[]));
-  void journals;
   const opId = newId16();
   await appendJournal(repo.metaDir, {
     op: opId,
@@ -441,44 +368,41 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
-  const anchorFlat = await flattenRoot(repo.store, decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId);
-  const curFlat = await flattenRoot(repo.store, decodeWorldVersion(await repo.store.readChecked(cur.id, 3)).rootId);
-  const layerFlat = await flattenRoot(repo.store, cp.rootId);
+  const anchorRoot = decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId;
+  const curRoot = decodeWorldVersion(await repo.store.readChecked(cur.id, 3)).rootId;
+  const [anchorFlat, curFlat, layerFlat, anchorExec, curExec, layerExec] = await Promise.all([
+    flattenRoot(repo.store, anchorRoot),
+    flattenRoot(repo.store, curRoot),
+    flattenRoot(repo.store, cp.rootId),
+    readFlat(repo.store, anchorRoot),
+    readFlat(repo.store, curRoot),
+    readFlat(repo.store, cp.rootId)
+  ]);
+  const execOf = (path: string): boolean => {
+    const anchor = anchorExec.files.get(path)?.executable;
+    const curBit = curExec.files.get(path)?.executable;
+    const layerBit = layerExec.files.get(path)?.executable;
+    const anchorBlob = anchorFlat.files.get(path) ?? null;
+    const curBlob = curFlat.files.get(path) ?? null;
+    const layerBlob = layerFlat.files.get(path) ?? null;
+    if (layerBlob !== null && layerBlob !== anchorBlob) return layerBit ?? false;
+    if (curBlob !== null && curBlob !== anchorBlob) return curBit ?? false;
+    return layerBit ?? curBit ?? anchor ?? false;
+  };
   const verdict = structuralCompatible(anchorFlat, curFlat, layerFlat);
   if (!verdict.ok) {
     await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { conflicts: verdict.conflicts } });
     return { checkpoint: cpId, adopted: cur.seq, conflicts: verdict.conflicts };
   }
-  const pending = new Map<string, Uint8Array>();
-  const putBlob = (content: Uint8Array): string => {
-    const bytes = encodeBlob(content);
-    pending.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  void putBlob;
-  const { encodeRefresh } = await import("./core/objects.js");
   const merged = verdict.merged;
-  const files = new Map<string, { bytes: Uint8Array; executable: boolean }>();
-  for (const [p, blob] of merged.files) {
-    const raw = await repo.store.readChecked(blob, 1);
-    const { unwrapObject: uo } = await import("./core/cbor.js");
-    const { payload } = uo(raw);
-    if (payload.tag !== "bytes") throw fail(CODES.corruptObject, "bad blob");
-    files.set(p, { bytes: payload.value, executable: false });
+  const mergedFlatFiles = new Map<string, { blobId: string; executable: boolean }>();
+  for (const [path, blobId] of merged.files) {
+    mergedFlatFiles.set(path, { blobId, executable: execOf(path) });
   }
-  const pending2 = new Map<string, Uint8Array>();
-  const pb2 = (content: Uint8Array): string => {
-    const bytes = encodeBlob(content);
-    pending2.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const pt2 = (entries: ReadonlyArray<{ name: string; kind: "file" | "dir" | "symlink"; target: string; executable: boolean }>): string => {
-    const bytes = encodeTree(entries);
-    pending2.set(objectId(bytes), bytes);
-    return objectId(bytes);
-  };
-  const { rootId } = buildTreeFromFiles(files, merged.symlinks, { putBlob: pb2, putTree: pt2 });
-  for (const bytes of pending2.values()) await repo.store.put(bytes);
+  const files = await hydrate(repo.store, { files: mergedFlatFiles, symlinks: merged.symlinks });
+  const stager2 = new TreeStager();
+  const { rootId } = buildTreeFromFiles(files, merged.symlinks, stager2);
+  await stager2.flush(repo.store);
   const recBytes = encodeRefresh({ layerId: ref.id, prevCheckpointId: cpId, prevAnchorId: cp.anchorId, adoptedId: cur.id, rootId, operationId: opId });
   const recId = await repo.store.put(recBytes);
   const fresh = encodeCheckpoint({
@@ -504,6 +428,3 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
 export function formatConflict(c: Conflict): string {
   return `${c.path} (${c.kind})`;
 }
-
-export { diffTrees, structuralCompatible };
-export type { Conflict as _Conflict };

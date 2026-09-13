@@ -1,12 +1,9 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { decodeContextManifest, decodeContextObject, encodeContextManifest, encodeContextObject } from "./core/objects.js";
-import { encodeBlob, objectId } from "./core/cbor.js";
 import { newId16 } from "./core/ids.js";
-import { appendJournal, loadRefs, saveRefs, updateJournal } from "./core/refs.js";
+import { loadRefs, saveRefs } from "./core/refs.js";
 import { CODES, fail } from "./core/types.js";
 import { checkpointLayer } from "./domain-layers.js";
-import { openRepo, type Repo } from "./core/repo.js";
+import type { Repo } from "./core/repo.js";
 
 export type Completeness = 0 | 1 | 2 | 3;
 
@@ -80,8 +77,6 @@ export async function sessionAppend(
     const id = await repo.store.put(bytes);
     objectIds.push(id);
   }
-  const gaps = findGaps([...cur.objectIds, ...objectIds], repo);
-  void gaps;
   const manifestBytes = encodeContextManifest({
     repoId: cur.repoId,
     layerId,
@@ -96,10 +91,6 @@ export async function sessionAppend(
   next.layers[layerId] = { ...ref, sessions: { ...ref.sessions, [sid]: manifestId } };
   await saveRefs(repo.metaDir, next);
   return { manifest: manifestId, objects: objectIds };
-}
-
-async function findGaps(_ids: ReadonlyArray<string>, _repo: Repo): Promise<ReadonlyArray<{ first: number; last: number }>> {
-  return [];
 }
 
 export async function sessionEnd(repo: Repo, layerId: string, sessionId: string, status: "complete" | "interrupted" = "complete"): Promise<string> {
@@ -160,5 +151,3 @@ export async function collectLayerContexts(repo: Repo, layerIds: ReadonlyArray<s
   }
   return [...out].sort();
 }
-
-export { openRepo };

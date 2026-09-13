@@ -1,6 +1,7 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { decodeCheckpoint, decodeContextManifest, decodeContextObject, decodeWorldVersion } from "./core/objects.js";
+import { decodeTree } from "./core/cbor.js";
+import { decodeCheckpoint, decodeContextManifest, decodeWorldVersion, decodePublication, decodeRefresh, decodeStack } from "./core/objects.js";
 import { unwrapObject } from "./core/cbor.js";
 import { loadRefs } from "./core/refs.js";
 import { CODES, fail } from "./core/types.js";
@@ -92,7 +93,6 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
 }
 
 async function checkTree(repo: { store: { readChecked: (id: string, t?: number) => Promise<Uint8Array> } }, rootId: string, issues: Array<VerifyIssue>): Promise<void> {
-  const { decodeTree } = await import("./core/cbor.js");
   const visit = async (id: string, stack: ReadonlyArray<string>): Promise<void> => {
     if (stack.includes(id)) {
       issues.push({ kind: "cycle", detail: id });
@@ -148,8 +148,6 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
     queue.push({ id: l.checkpoint, type: 4 });
     for (const mid of Object.values(l.sessions)) queue.push({ id: mid, type: 6 });
   }
-  const { decodeTree: dt } = await import("./core/cbor.js");
-  const { decodePublication, decodeRefresh, decodeStack } = await import("./core/objects.js");
   while (queue.length > 0) {
     const item = queue.pop()!;
     if (reachable.has(item.id)) continue;
@@ -176,7 +174,7 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
         if (cp.recordId !== null) queue.push({ id: cp.recordId });
         for (const c of cp.contextIds) queue.push({ id: c, type: 6 });
       } else if (type === 2) {
-        const entries = dt(bytes);
+        const entries = decodeTree(bytes);
         for (const e of entries) {
           if (e.kind === "file") queue.push({ id: e.target, type: 1 });
           else if (e.kind === "dir") queue.push({ id: e.target, type: 2 });
@@ -214,7 +212,6 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
   const all = await listObjects(repo);
   let removed = 0;
   if (!dryRun) {
-    const { rm } = await import("node:fs/promises");
     for (const id of all) {
       if (!reachable.has(id)) {
         await rm(join(repo.metaDir, "objects", id.slice(0, 2), id.slice(2)), { force: true });
@@ -242,5 +239,3 @@ async function listObjects(repo: { metaDir: string }): Promise<ReadonlyArray<str
   }
   return out;
 }
-
-export { flattenRoot, openRepo };
