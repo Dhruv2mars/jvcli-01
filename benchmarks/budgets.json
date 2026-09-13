@@ -1,16 +1,25 @@
 {
-  "_note": "PLACEHOLDER baselines. Measure on release machine before enforcing. Do not treat these numbers as real until remeasured.",
-  "machine": "measure on release machine",
-  "workload": { "layers": 5, "filesPerLayer": 5 },
-  "baselines": {
-    "publishMs": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" },
-    "verifyMs": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" },
-    "bytesPerLayer": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" },
-    "objects": { "p50": 0, "note": "PLACEHOLDER, measure on release machine" }
+  "_note": "Baselines measured on Apple Silicon (darwin/arm64) dev machine, 2026-09-13. Rerun bun benchmarks/run.ts to refresh.",
+  "machine": "darwin/arm64 dev machine",
+  "workload5": { "layers": 5, "filesPerLayer": 5 },
+  "baselines5": {
+    "publishP50Ms": 850,
+    "verifyMs": 330,
+    "statusMs": 330,
+    "bytesPerLayer": 4000,
+    "objects": 28
+  },
+  "workload100": { "layers": 100, "filesPerLayer": 5 },
+  "baselines100": {
+    "publishP50Ms": 20000,
+    "verifyMs": 800,
+    "statusMs": 300,
+    "bytesPerLayer": 4144,
+    "objects": 553
   },
   "regression": {
-    "metric": "publishMs.p50",
+    "metric": "publishP50Ms",
     "threshold": 1.2,
-    "rule": "fail if publish p50 regresses more than 20 percent versus budgets.json"
+    "rule": "fail if publish p50 regresses more than 20 percent versus budgets.json at the same workload"
   }
 }
