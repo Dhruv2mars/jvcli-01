@@ -13,7 +13,13 @@ mkdir -p "$WORK/install"
 tar -xzf "$PKG" -C "$WORK/install"
 cd "$WORK/install/package"
 test -f dist/cli-entry.js
+test -x dist/cli-entry.js
 bun install --silent >/dev/null 2>&1
-node dist/cli-entry.js --help >/dev/null
-"$ROOT/scripts/ga-walkthrough.sh" "$WORK/install/package/dist/cli-entry.js"
-printf 'PACK-SMOKE-GREEN %s\n' "$PKG"
+export PATH="$WORK/install/package/node_modules/.bin:$PATH"
+BIN="$WORK/install/package/dist/cli-entry.js"
+JVCLI_BIN="$(bun pm bin 2>/dev/null)/jvcli-01"
+if test -x "$JVCLI_BIN"; then BIN="$JVCLI_BIN"; fi
+test -x "$BIN"
+"$BIN" --help >/dev/null
+JVCLI_SMOKE_BIN="$BIN" "$ROOT/scripts/ga-walkthrough.sh" "$BIN"
+printf 'PACK-SMOKE-GREEN %s via %s\n' "$PKG" "$BIN"

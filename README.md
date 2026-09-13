@@ -50,8 +50,9 @@ jvcli stack feat-a feat-b --into combined
 jvcli publish combined
 ```
 
-Every command accepts `--json` for scripting. Conflicts exit `2` with
-the conflicting paths. All other failures exit `1`.
+Most commands accept `--json` for scripting. `help` prints text, and
+`show` of a blob emits raw bytes. Conflicts and stale-world failures exit
+`2` with the conflicting paths or a retry hint. All other failures exit `1`.
 
 ## Docs
 
