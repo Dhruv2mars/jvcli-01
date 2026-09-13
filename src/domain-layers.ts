@@ -77,9 +77,17 @@ export async function checkpointLayer(repo: Repo, layerId: string, recordId: str
     contextIds: mergedCtx
   });
   const cpId = await repo.store.put(cpBytes);
-  const next = structuredClone(refs);
-  next.layers[layerId] = { ...ref, checkpoint: cpId };
-  await saveRefs(repo.metaDir, next);
+  const latest = await loadRefs(repo.metaDir);
+  const latestRef = latest.layers[layerId];
+  if (latestRef === undefined) throw fail(CODES.layerNotFound, `no such layer`, { layerId });
+  if (latestRef.checkpoint !== ref.checkpoint) {
+    throw fail(CODES.busy, "layer checkpoint advanced concurrently; retry", { layerId, retryable: true });
+  }
+  const next = structuredClone(latest);
+  next.layers[layerId] = { ...latestRef, checkpoint: cpId };
+  if (!await casRefs(repo.metaDir, latest, next)) {
+    throw fail(CODES.busy, "layer checkpoint advanced concurrently; retry", { layerId, retryable: true });
+  }
   return cpId;
 }
 

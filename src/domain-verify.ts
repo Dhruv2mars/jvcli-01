@@ -55,8 +55,16 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
   }
   for (const layer of Object.values(refs.layers)) {
     if (layer.state === "deleted") continue;
-    const bytes = await checkObject(layer.checkpoint, 4);
-    if (bytes !== null) {
+    let cursor: string | null = layer.checkpoint;
+    const seenChain = new Set<string>();
+    while (cursor !== null) {
+      if (seenChain.has(cursor)) {
+        issues.push({ kind: "checkpoint-cycle", detail: `${layer.id}: ${cursor}` });
+        break;
+      }
+      seenChain.add(cursor);
+      const bytes = await checkObject(cursor, 4);
+      if (bytes === null) break;
       try {
         const cp = decodeCheckpoint(bytes);
         if (cp.layerId !== layer.id) issues.push({ kind: "layer-mismatch", detail: layer.id });
@@ -68,9 +76,11 @@ export async function verifyRepo(root: string, full: boolean): Promise<{ worlds:
           if (rb !== null) await checkRecordBody(rb, layer.id, cp, prevCpBytes, issues);
         }
         for (const c of cp.contextIds) await checkObject(c, 6);
-        if (full) await checkTree(repo, cp.rootId, issues);
+        if (full && cursor === layer.checkpoint) await checkTree(repo, cp.rootId, issues);
+        cursor = cp.prevId;
       } catch (e) {
         issues.push({ kind: "bad-checkpoint", detail: `${layer.id}: ${e instanceof Error ? e.message : String(e)}` });
+        break;
       }
     }
     for (const [sid, mid] of Object.entries(layer.sessions)) {

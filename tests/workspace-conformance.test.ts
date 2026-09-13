@@ -168,6 +168,20 @@ describe("workspace conformance: fs", () => {
     expect(bytesEqual(rv!.bytes, enc.encode("v2-longer"))).toBe(true);
     expect(await be.enumerateView(LAYER)).toEqual(["added.txt", "watched.txt"]);
   });
+
+  test("chmod-only edit invalidates the fast path", async () => {
+    const be = new FsBackend((layer) => join(dir, `chmod-${layer}`));
+    await be.createWorkspace(LAYER, ROOT, {
+      files: new Map<string, FileView>([["run.sh", fv("#!/bin/sh\n")]]),
+      symlinks: new Map<string, string>(),
+    });
+    expect((await be.flushWorkspace(LAYER)).dirty).toBe(false);
+    const { chmod } = await import("node:fs/promises");
+    await chmod(join(dir, `chmod-${LAYER}`, "run.sh"), 0o755);
+    const second = await be.flushWorkspace(LAYER);
+    expect(second.dirty).toBe(true);
+    expect(second.files.get("run.sh")?.executable).toBe(true);
+  });
 });
 
 describe("workspace conformance: memory", () => {
@@ -217,3 +231,4 @@ describe("workspace conformance: cross-backend", () => {
     }
   });
 });
+

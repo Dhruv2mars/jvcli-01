@@ -36,7 +36,8 @@ async function probeTree(root: string): Promise<ReadonlyMap<string, Fingerprint>
       }
       if (!entry.isFile() && !entry.isSymbolicLink()) continue;
       const st = await lstat(join(dir, entry.name));
-      out.set(rel, `${st.mtimeMs}:${st.size}`);
+      const exec = entry.isFile() ? (modeIsExecutable(st.mode) ? "x" : "-") : "l";
+      out.set(rel, `${st.mtimeMs}:${st.size}:${exec}`);
     }
   };
   await visit(root, "");
