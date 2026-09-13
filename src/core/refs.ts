@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CODES, fail, type LayerState } from "./types.js";
 
@@ -128,6 +128,27 @@ export async function readJournal(metaDir: string, operationId: string): Promise
     if ((e as { code?: string }).code === "ENOENT") return null;
     throw e;
   }
+}
+
+export async function listJournals(metaDir: string): Promise<ReadonlyArray<JournalEntry>> {
+  const dir = join(metaDir, "journal");
+  let files: Array<string> = [];
+  try {
+    files = (await readdir(dir)).filter((f) => f.endsWith(".json"));
+  } catch (e) {
+    if ((e as { code?: string }).code === "ENOENT") return [];
+    throw e;
+  }
+  const out: Array<JournalEntry> = [];
+  for (const f of files) {
+    try {
+      const raw = await readFile(join(dir, f), "utf8");
+      out.push(JSON.parse(raw) as JournalEntry);
+    } catch {
+      // unreadable journal entry pins GC conservatively via the caller
+    }
+  }
+  return out;
 }
 
 export async function updateJournal(metaDir: string, operationId: string, patch: Partial<JournalEntry>): Promise<void> {
