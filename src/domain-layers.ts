@@ -276,7 +276,7 @@ export async function cloneLayer(repo: Repo, selector: string, name?: string, ch
     const clash = Object.values(refs.layers).some((l) => l.name === name && l.state !== "deleted");
     if (clash) throw fail(CODES.io, `layer name taken: ${name}`);
   }
-  const cpId = checkpoint ?? src.checkpoint;
+  const cpId = checkpoint === undefined && src.state === "active" ? await flushLayer(repo, src.id) : (checkpoint ?? src.checkpoint);
   const cp = decodeCheckpoint(await repo.store.readChecked(cpId, 4));
   if (cp.layerId !== src.id) throw fail(CODES.invalidPath, "checkpoint belongs to another layer");
   const id = newId16();
