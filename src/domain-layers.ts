@@ -418,19 +418,36 @@ export async function deleteLayer(repo: Repo, selector: string): Promise<void> {
       hint: "a concurrent operation touched the layer; retry the delete"
     });
   }
+  await updateJournal(repo.metaDir, opId, { state: "accepted", payload: { checkpoint: live.checkpoint } });
+  await crashIfFault("delete-layer:after-accepted", opId);
   await rm(layerWorkspaceDir(repo, ref.id), { recursive: true, force: true });
-  await updateJournal(repo.metaDir, opId, { state: "finalized" });
+  await crashIfFault("delete-layer:after-workspace-removed", opId);
+  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { checkpoint: live.checkpoint } });
 }
 
-export async function refreshLayer(repo: Repo, selector: string): Promise<{ checkpoint: string; adopted: number; conflicts: ReadonlyArray<Conflict> }> {
+export async function refreshLayer(repo: Repo, selector: string, operationId?: string): Promise<{ checkpoint: string; adopted: number; conflicts: ReadonlyArray<Conflict> }> {
   const refs = await loadRefs(repo.metaDir);
   const ref = resolveLayerRef(refs, selector);
   if (ref.state !== "active") throw fail(CODES.layerState, `layer is ${ref.state}`, { layerId: ref.id });
-  const cpId = await flushLayer(repo, ref.id);
-  const cp = decodeCheckpoint(await repo.store.readChecked(cpId, 4));
-  const cur = await currentSeqOf(repo);
-  if (cp.anchorId === cur.id) return { checkpoint: cpId, adopted: cur.seq, conflicts: [] };
-  const opId = newId16();
+  const cpId0 = await flushLayer(repo, ref.id);
+  const cp0 = decodeCheckpoint(await repo.store.readChecked(cpId0, 4));
+  const cur0 = await currentSeqOf(repo);
+  if (cp0.anchorId === cur0.id) return { checkpoint: cpId0, adopted: cur0.seq, conflicts: [] };
+  const opId = (operationId ?? newId16()).toLowerCase();
+  const prior = await readJournal(repo.metaDir, opId);
+  if (prior !== null) {
+    if (prior.kind !== "refresh") {
+      throw fail(CODES.io, "operation id belongs to another op", { layerId: ref.id, operationId: opId });
+    }
+    if (prior.layerId !== ref.id && prior.layerId !== undefined) {
+      throw fail(CODES.io, `operation id ${opId} belongs to layer ${prior.layerId}`, { layerId: ref.id, operationId: opId });
+    }
+    const resumed = await resumeInterruptedRefresh(repo, ref.id, opId, prior.state, prior.payload, cur0);
+    if (resumed !== null) return resumed;
+  }
+  const cpId = cpId0;
+  const cp = cp0;
+  const cur = cur0;
   await appendJournal(repo.metaDir, {
     op: opId,
     kind: "refresh",
@@ -441,6 +458,7 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
+  await crashIfFault("refresh:after-prepared", opId);
   const anchorRoot = decodeWorldVersion(await repo.store.readChecked(cp.anchorId, 3)).rootId;
   const curRoot = decodeWorldVersion(await repo.store.readChecked(cur.id, 3)).rootId;
   const [anchorFlat, curFlat, layerFlat, anchorExec, curExec, layerExec] = await Promise.all([
@@ -482,6 +500,8 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
   await stager2.flush(repo.store);
   const recBytes = encodeRefresh({ layerId: ref.id, prevCheckpointId: cpId, prevAnchorId: cp.anchorId, adoptedId: cur.id, rootId, operationId: opId });
   const recId = await repo.store.put(recBytes);
+  await updateJournal(repo.metaDir, opId, { state: "objects_durable", payload: { checkpoint: cpId, adopted: cur.id, root: rootId, record: recId } });
+  await crashIfFault("refresh:after-merge-durable", opId);
   const fresh = encodeCheckpoint({
     layerId: ref.id,
     originKind: cp.originKind,
@@ -504,11 +524,99 @@ export async function refreshLayer(repo: Repo, selector: string): Promise<{ chec
   if (!swapped) {
     throw fail(CODES.busy, "layer changed during refresh; retry", { layerId: ref.id, operationId: opId, retryable: true });
   }
-  await updateJournal(repo.metaDir, opId, { state: "finalized" });
+  await updateJournal(repo.metaDir, opId, { state: "accepted", payload: { checkpoint: freshId, adopted: cur.id } });
+  await crashIfFault("refresh:after-accepted", opId);
+  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { checkpoint: freshId, adopted: cur.id } });
   await materializeFromRoot(repo, layerWorkspaceDir(repo, ref.id), rootId, ref.id);
   return { checkpoint: freshId, adopted: cur.seq, conflicts: [] };
 }
 
+async function resumeInterruptedRefresh(
+  repo: Repo,
+  layerId: string,
+  opId: string,
+  state: string,
+  payload: unknown,
+  cur0: { seq: number; id: string }
+): Promise<{ checkpoint: string; adopted: number; conflicts: ReadonlyArray<Conflict> } | null> {
+  const refs = await loadRefs(repo.metaDir);
+  const ref = refs.layers[layerId];
+  if (ref === undefined) throw fail(CODES.layerNotFound, "no such layer", { layerId });
+  if (ref.state !== "active") throw fail(CODES.layerState, `layer is ${ref.state}`, { layerId });
+  if (state === "finalized" || state === "accepted") {
+    const p = payload as { checkpoint?: string; adopted?: string };
+    if (typeof p.checkpoint === "string" && ref.checkpoint === p.checkpoint) {
+      return { checkpoint: p.checkpoint, adopted: cur0.seq, conflicts: [] };
+    }
+    throw fail(CODES.busy, "refresh operation already completed; retry as a new operation", { layerId, operationId: opId, retryable: true });
+  }
+  if (state === "conflict") {
+    const p = payload as { conflicts?: ReadonlyArray<Conflict> };
+    return { checkpoint: ref.checkpoint, adopted: cur0.seq, conflicts: p.conflicts ?? [] };
+  }
+  if (state === "objects_durable") {
+    const p = payload as { checkpoint?: string; adopted?: string; root?: string; record?: string };
+    if (typeof p.checkpoint !== "string" || typeof p.adopted !== "string" || typeof p.root !== "string" || typeof p.record !== "string") {
+      throw fail(CODES.corruptObject, "refresh journal missing durable objects", { layerId, operationId: opId });
+    }
+    if (ref.checkpoint === p.checkpoint) {
+      const cp = decodeCheckpoint(await repo.store.readChecked(p.checkpoint, 4));
+      const reloaded = await loadRefs(repo.metaDir);
+      const liveWorld = reloaded.currentWorld !== "" ? reloaded.currentWorld : p.adopted;
+      const curSeq = decodeWorldVersion(await repo.store.readChecked(liveWorld, 3)).seq;
+      const fresh = encodeCheckpoint({
+        layerId,
+        originKind: cp.originKind,
+        originId: cp.originId,
+        anchorId: p.adopted,
+        rootId: p.root,
+        prevId: p.checkpoint,
+        recordId: p.record,
+        contextIds: cp.contextIds
+      });
+      const freshId = await repo.store.put(fresh);
+      const latest = await loadRefs(repo.metaDir);
+      const latestRef = latest.layers[layerId];
+      if (latestRef === undefined || latestRef.checkpoint !== p.checkpoint || latestRef.state !== "active") {
+        throw fail(CODES.busy, "layer changed during refresh; retry as a new operation", { layerId, operationId: opId, retryable: true });
+      }
+      const nl = structuredClone(latest);
+      nl.layers[layerId] = { ...latestRef, checkpoint: freshId };
+      if (!await casRefs(repo.metaDir, latest, nl)) {
+        throw fail(CODES.busy, "layer changed during refresh; retry as a new operation", { layerId, operationId: opId, retryable: true });
+      }
+      await updateJournal(repo.metaDir, opId, { state: "accepted", payload: { checkpoint: freshId, adopted: p.adopted } });
+      await crashIfFault("refresh:after-accepted", opId);
+      await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { checkpoint: freshId, adopted: p.adopted } });
+      await materializeFromRoot(repo, layerWorkspaceDir(repo, layerId), p.root, layerId);
+      return { checkpoint: freshId, adopted: curSeq, conflicts: [] };
+    }
+    if (ref.checkpoint !== p.checkpoint) {
+      throw fail(CODES.busy, "layer changed during refresh; retry as a new operation", { layerId, operationId: opId, retryable: true });
+    }
+    return null;
+  }
+  if (state === "prepared") {
+    const p = payload as { checkpoint?: string; adopted?: string };
+    const curCp = await flushLayer(repo, layerId);
+    if (typeof p.checkpoint === "string" && curCp !== p.checkpoint) {
+      throw fail(CODES.busy, "layer changed during refresh; retry as a new operation", { layerId, operationId: opId, retryable: true });
+    }
+    return null;
+  }
+  return null;
+}
+
 export function formatConflict(c: Conflict): string {
   return `${c.path} (${c.kind})`;
+}
+
+function refreshFaultEnabled(name: string): boolean {
+  return (process.env.JVCLI_FAULT ?? "").split(",").map((s) => s.trim()).filter(Boolean).includes(name);
+}
+
+async function crashIfFault(name: string, operationId: string): Promise<void> {
+  if (refreshFaultEnabled(name)) {
+    throw fail(CODES.interrupted, `fault injected at ${name}`, { operationId, retryable: true, hint: "retry the operation" });
+  }
 }

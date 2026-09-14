@@ -1,9 +1,9 @@
-import { readdir, rm, stat } from "node:fs/promises";
+import { readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { decodeTree } from "./core/cbor.js";
 import { decodeCheckpoint, decodeContextManifest, decodeWorldVersion, decodePublication, decodeRefresh, decodeStack } from "./core/objects.js";
 import { unwrapObject } from "./core/cbor.js";
-import { listJournals, loadRefs, type JournalEntry } from "./core/refs.js";
+import { appendJournal, listJournals, loadRefs, readJournal, updateJournal, type JournalEntry } from "./core/refs.js";
 import { CODES, fail } from "./core/types.js";
 import { flattenRoot, openRepo } from "./core/repo.js";
 
@@ -205,6 +205,28 @@ export interface GcResult {
 
 export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
   const repo = await openRepo(root);
+  const fault = (process.env.JVCLI_FAULT ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const gcOp = fault.find((f) => f.startsWith("gc:") && f.includes("="))?.split("=")[1]?.toLowerCase();
+  const opId = gcOp !== undefined && gcOp !== "" ? gcOp : undefined;
+  if (opId !== undefined) {
+    const preread = await readJournal(repo.metaDir, opId);
+    if (preread !== null && preread.kind === "gc") {
+      if (preread.state === "finalized" || preread.state === "accepted") return preread.payload as GcResult;
+    } else if (preread !== null && preread.kind !== "gc") {
+      throw fail(CODES.io, "operation id belongs to another op", { operationId: opId });
+    } else if (preread === null) {
+      await appendJournal(repo.metaDir, {
+        op: opId,
+        kind: "gc",
+        state: "prepared",
+        operationId: opId,
+        payload: { dryRun },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      await crashIfGcFault("gc:after-prepared", opId);
+    }
+  }
   const refs = await loadRefs(repo.metaDir);
   const reachable = new Set<string>();
   const queue: Array<{ id: string; type?: number }> = [];
@@ -299,6 +321,18 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
   }
   const staleTmp = await findStaleTmp(repo.metaDir, cutoff);
   const eligible = unreach.filter((id) => !quarantine.has(id));
+  if (opId !== undefined) {
+    await updateJournal(repo.metaDir, opId, { state: "objects_durable", payload: { candidates: eligible, dryRun } });
+    await crashIfGcFault("gc:after-mark", opId);
+    const reread = await readJournal(repo.metaDir, opId);
+    if (reread !== null && reread.kind === "gc" && (reread.state === "finalized" || reread.state === "accepted")) {
+      return reread.payload as GcResult;
+    }
+    const snap = await loadRefs(repo.metaDir);
+    if (JSON.stringify(Object.keys(snap.worldsBySeq).sort()) !== JSON.stringify(Object.keys(refs.worldsBySeq).sort()) || snap.currentWorld !== refs.currentWorld) {
+      throw fail(CODES.busy, "world advanced during gc; retry the gc", { operationId: opId, retryable: true });
+    }
+  }
   let removed = 0;
   if (!dryRun) {
     for (const id of eligible) {
@@ -306,10 +340,28 @@ export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
       removed++;
     }
     for (const path of staleTmp) await rm(path, { force: true });
+    if (opId !== undefined) {
+      await updateJournal(repo.metaDir, opId, { state: "accepted", payload: { reachable: reachable.size, total: all.length, removed, dryRun } });
+      await crashIfGcFault("gc:after-sweep", opId);
+    }
   } else {
     removed = eligible.length;
   }
-  return { reachable: reachable.size, total: all.length, removed, dryRun };
+  const result = { reachable: reachable.size, total: all.length, removed, dryRun };
+  if (opId !== undefined) {
+    await updateJournal(repo.metaDir, opId, { state: "finalized", payload: result });
+  }
+  return result;
+}
+
+function gcFaultEnabled(name: string): boolean {
+  return (process.env.JVCLI_FAULT ?? "").split(",").map((s) => s.trim()).filter(Boolean).includes(name);
+}
+
+async function crashIfGcFault(name: string, operationId: string): Promise<void> {
+  if (gcFaultEnabled(name)) {
+    throw fail(CODES.interrupted, `fault injected at ${name}`, { operationId, retryable: true, hint: "retry the gc" });
+  }
 }
 
 function collectJournalRoots(entry: { payload: unknown }, queue: Array<{ id: string; type?: number }>): void {

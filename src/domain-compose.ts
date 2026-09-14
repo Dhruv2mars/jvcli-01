@@ -262,18 +262,31 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   const sources = selectors.map((s) => resolveLayerRef(refs0, s));
   if (stacked !== null) {
     if (stacked.kind !== "stack") throw fail(CODES.io, "operation id belongs to another op", { operationId: opId });
-    if (stacked.state === "finalized") {
+    if (stacked.state === "finalized" || stacked.state === "accepted") {
       const prior = stacked.payload as { dest: string; sources?: ReadonlyArray<string>; into?: string | null; order?: ReadonlyArray<string> };
-      const sameSources = prior.sources !== undefined
-        && prior.sources.length === sources.length
-        && sources.every((s) => prior.sources!.includes(s.id));
-      const sameInto = (prior.into ?? null) === (name ?? null);
-      if (!sameSources || !sameInto) {
-        throw fail(CODES.io, `operation id ${opId} belongs to a different stack`, { operationId: opId });
+      if (stacked.state === "finalized") {
+        const sameSources = prior.sources !== undefined
+          && prior.sources.length === sources.length
+          && sources.every((s) => prior.sources!.includes(s.id));
+        const sameInto = (prior.into ?? null) === (name ?? null);
+        if (!sameSources || !sameInto) {
+          throw fail(CODES.io, `operation id ${opId} belongs to a different stack`, { operationId: opId });
+        }
       }
       const destRef = (await loadRefs(repo.metaDir)).layers[prior.dest];
       if (destRef === undefined) throw fail(CODES.corruptObject, `stack destination missing: ${prior.dest}`, { operationId: opId });
       return { destId: prior.dest, workspace: destRef.workspace ?? layerWorkspaceDir(repo, prior.dest), operationId: opId, order: prior.order ?? [] };
+    }
+    if (stacked.state === "objects_durable") {
+      const recovery = stacked.payload as { dest?: string; sources?: ReadonlyArray<string>; into?: string | null; order?: ReadonlyArray<string> };
+      if (recovery.sources === undefined || recovery.sources.length !== sources.length || !sources.every((s) => recovery.sources!.includes(s.id))) {
+        throw fail(CODES.io, `operation id ${opId} belongs to a different stack`, { operationId: opId });
+      }
+      if ((recovery.into ?? null) !== (name ?? null)) {
+        throw fail(CODES.io, `operation id ${opId} belongs to a different stack`, { operationId: opId });
+      }
+      const recovered = await recoverStackObjectsDurable(repo, opId, recovery, name);
+      return { ...recovered, operationId: opId };
     }
   }
   for (const s of sources) {
@@ -350,11 +363,13 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     op: opId,
     kind: "stack",
     state: "prepared",
+    layerId: live[0]!.id,
     operationId: opId,
-    payload: { sources: live.map((s) => s.id) },
+    payload: { sources: live.map((s) => s.id), into: name ?? null },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
+  await crashIf("stack:after-prepared");
   const flat = { files: new Map([...acc.files].map(([path, blobId]) => [path, { blobId, executable: accExec.get(path) ?? false }] as const)), symlinks: acc.symlinks };
   const hydrated = await hydrate(repo.store, flat);
   const files = new Map<string, { bytes: Uint8Array; executable: boolean }>(hydrated);
@@ -388,6 +403,9 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     const curRef = snapshot.layers[s.id];
     if (curRef === undefined || curRef.state !== "active") throw fail(CODES.busy, "source changed during stack; retry", { operationId: opId, retryable: true });
   }
+  const stacksDurable = updateJournal(repo.metaDir, opId, { state: "objects_durable", payload: { dest: destId, sources: live.map((s) => s.id), into: name ?? null, cpIds, root: builtRoot, stack: stackId, checkpoint: destCpId, order } });
+  await stacksDurable;
+  await crashIf("stack:after-objects-durable");
   const next = structuredClone(snapshot);
   const ws = join(repo.metaDir, "layers", destId, "workspace");
   next.layers[destId] = { id: destId, name: name ?? null, originKind: 1, originId: cur, checkpoint: destCpId, state: "active", agent: null, sessions: {}, workspace: ws };
@@ -397,9 +415,76 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   }
   const ok = await casRefs(repo.metaDir, snapshot, next);
   if (!ok) throw fail(CODES.busy, "concurrent stack; retry", { operationId: opId, retryable: true });
-  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId, order, sources: live.map((s) => s.id), into: name ?? null } });
   await materializeFromRoot(repo, ws, builtRoot, destId);
+  await updateJournal(repo.metaDir, opId, { state: "accepted", payload: { dest: destId, order, sources: live.map((s) => s.id), into: name ?? null } });
+  await crashIf("stack:after-accepted");
+  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId, order, sources: live.map((s) => s.id), into: name ?? null } });
   return { destId, workspace: ws, operationId: opId, order };
+}
+
+/**
+ * Retry path for a stack interrupted after its tree, stack record, and
+ * destination checkpoint were persisted but before refs.json swapped.
+ * All persisted objects are content-addressed, so reusing the journaled
+ * dest id and checkpoint yields exactly the same destination layer.
+ */
+async function recoverStackObjectsDurable(
+  repo: Repo,
+  opId: string,
+  recovery: { dest?: string; sources?: ReadonlyArray<string>; into?: string | null; order?: ReadonlyArray<string> },
+  name: string | undefined
+): Promise<{ destId: string; workspace: string; order: ReadonlyArray<string> }> {
+  const destId = recovery.dest;
+  const checkpoint = (recovery as { checkpoint?: string }).checkpoint;
+  const order = recovery.order ?? [];
+  if (destId === undefined || checkpoint === undefined) {
+    throw fail(CODES.corruptObject, "stack journal missing destination", { operationId: opId });
+  }
+  const refs = await loadRefs(repo.metaDir);
+  const existing = refs.layers[destId];
+  if (existing !== undefined) {
+    return { destId, workspace: existing.workspace ?? layerWorkspaceDir(repo, destId), order };
+  }
+  const sources = recovery.sources ?? [];
+  for (const sid of sources) {
+    const curRef = refs.layers[sid];
+    if (curRef === undefined || curRef.state !== "active") {
+      throw fail(CODES.busy, "source changed during stack; retry as a new operation", { layerId: sid, operationId: opId, retryable: true });
+    }
+  }
+  const snapshot = structuredClone(refs);
+  const destCp = decodeCheckpoint(await repo.store.readChecked(checkpoint, 4));
+  if (destCp.layerId !== destId) {
+    throw fail(CODES.corruptObject, "stack journal checkpoint belongs to another layer", { operationId: opId });
+  }
+  const clash = name !== undefined
+    ? Object.values(refs.layers).some((l) => l.name === name && l.state !== "deleted")
+    : false;
+  if (clash) throw fail(CODES.io, `layer name taken: ${name}`, { operationId: opId });
+  const next = structuredClone(snapshot);
+  const ws = join(repo.metaDir, "layers", destId, "workspace");
+  next.layers[destId] = {
+    id: destId,
+    name: name ?? null,
+    originKind: 1,
+    originId: destCp.anchorId,
+    checkpoint,
+    state: "active",
+    agent: null,
+    sessions: {},
+    workspace: ws
+  };
+  for (const sid of sources) {
+    const r = next.layers[sid]!;
+    next.layers[sid] = { ...r, state: "consumed" as LayerState };
+  }
+  const ok = await casRefs(repo.metaDir, snapshot, next);
+  if (!ok) throw fail(CODES.busy, "concurrent stack; retry as a new operation", { operationId: opId, retryable: true });
+  await materializeFromRoot(repo, ws, destCp.rootId, destId);
+  await updateJournal(repo.metaDir, opId, { state: "accepted", payload: { dest: destId, order, sources, into: name ?? null } });
+  await crashIf("stack:after-accepted");
+  await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId, order, sources, into: name ?? null } });
+  return { destId, workspace: ws, order };
 }
 
 function orderSources(sources: ReadonlyArray<{ layerId: string; anchorId: string; cpId: string }>): ReadonlyArray<string> {
