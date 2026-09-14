@@ -126,6 +126,48 @@ revalidating them against the recomputed merge, so post-crash workspace dirt
 never leaks into the recovered world. `tests/recovery.test.ts` covers all
 three points plus the stale-retry case.
 
+Checkpoint, refresh, stack, delete-layer, and gc add their own points under
+the same `JVCLI_FAULT` variable. Every point fails with retryable
+`E_INTERRUPTED` (`tests/fault-matrix.test.ts` covers each plus the store
+boundary cases below):
+
+- Checkpoint (`checkpoint --layer`): `checkpoint:after-prepared` (journaled
+  `prepared`, no objects yet; retry checkpoints once),
+  `checkpoint:after-objects-durable` (checkpoint object durable; retry
+  converges on one checkpoint, never two).
+- Refresh (`layer refresh`): `refresh:after-prepared`,
+  `refresh:after-merge-durable` (merged tree plus refresh record journaled as
+  `objects_durable`; refs swap not yet done, so the layer is still on the
+  old checkpoint and `verify --full` stays clean; retry completes the swap
+  exactly once), `refresh:after-accepted` (swap plus journal `accepted`
+  plus rematerialized workspace are durable; retry is then a no-op that
+  reports the same checkpoint).
+- Stack (`stack --operation-id`): `stack:after-prepared`,
+  `stack:after-objects-durable` (merged tree, stack record, and destination
+  checkpoint durable with the destination id in the journal; retry reuses
+  that id and checkpoint instead of allocating a second destination),
+  `stack:after-accepted` (refs swap plus workspace durable; retry returns
+  the same destination). Retry with a finalized id is idempotent and
+  returns the same `dest`.
+- Delete (`layer delete`): `delete-layer:after-accepted` (tombstone durable,
+  workspace still present; retry finishes the removal),
+  `delete-layer:after-workspace-removed` (tombstone plus removal durable;
+  retry is a no-op success). `verify --full` stays clean at both points
+  because a deleted ref drops its workspace requirement.
+- GC (`gc`): `gc:after-prepared`, `gc:after-mark` (candidate set journaled
+  as `objects_durable`; nothing deleted yet, so retry recomputes the same
+  mark), `gc:after-sweep` (sweep plus journal `accepted` durable; retry
+  returns the recorded result). The gc journal id is derived from the fault
+  list (`gc:op=<id>` overrides the default), and `verify --full` stays
+  clean because unreachable-but-live objects are never swept mid-run.
+
+Store boundary (disk-full and short-write): an unwritable `objects/` dir
+fails the in-flight op (for example publish reports `E_IO`) while
+`verify --full` stays clean; restoring permissions and retrying publishes
+exactly one new world. Truncated object bytes fail hash verification on
+read, and `verify --full` reports `E_CORRUPT_OBJECT`. Both cases are
+covered in `tests/fault-matrix.test.ts`.
+
 Conflict semantics: merges are three way over flattened path maps with a
 common anchor. Identical changes on both sides merge silently. Any path
 changed differently on each side is a conflict: concurrent writes give

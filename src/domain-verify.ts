@@ -206,7 +206,10 @@ export interface GcResult {
 export async function gcRepo(root: string, dryRun: boolean): Promise<GcResult> {
   const repo = await openRepo(root);
   const fault = (process.env.JVCLI_FAULT ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  const gcOp = fault.find((f) => f.startsWith("gc:") && f.includes("="))?.split("=")[1]?.toLowerCase();
+  const gcOp = fault.find((f) => f === "gc:after-prepared" || f === "gc:after-mark" || f === "gc:after-sweep")
+    !== undefined
+    ? (fault.find((f) => f.startsWith("gc:op="))?.split("=")[1]?.toLowerCase() ?? "gc-fault-op")
+    : fault.find((f) => f.startsWith("gc:") && f.includes("="))?.split("=")[1]?.toLowerCase();
   const opId = gcOp !== undefined && gcOp !== "" ? gcOp : undefined;
   if (opId !== undefined) {
     const preread = await readJournal(repo.metaDir, opId);
