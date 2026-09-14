@@ -212,12 +212,34 @@ export async function flushLayer(repo: Repo, selector: string): Promise<string> 
   const refs = await loadRefs(repo.metaDir);
   const ref = resolveLayerRef(refs, selector);
   if (ref.state !== "active") return ref.checkpoint;
-  const before = await repo.store.readChecked(ref.checkpoint, 4);
-  const prev = decodeCheckpoint(before);
   const ws = layerWorkspaceDir(repo, ref.id);
-  const scan = await scanDirectory(ws);
+  let scan;
+  try {
+    scan = await scanDirectory(ws);
+  } catch (e) {
+    if ((e as { code?: string }).code === "ENOENT") {
+      const gone = await loadRefs(repo.metaDir);
+      const goneRef = gone.layers[ref.id];
+      if (goneRef === undefined) throw fail(CODES.layerNotFound, `no such layer`, { layerId: ref.id });
+      throw fail(CODES.layerState, `layer is ${goneRef.state}`, { layerId: ref.id });
+    }
+    throw e;
+  }
   const stager = new TreeStager();
   const { rootId } = buildTreeFromFiles(scan.files, scan.symlinks, stager);
+  const fresh = await loadRefs(repo.metaDir);
+  const freshRef = fresh.layers[ref.id];
+  if (freshRef === undefined) throw fail(CODES.layerNotFound, `no such layer`, { layerId: ref.id });
+  if (freshRef.state !== "active") {
+    throw fail(CODES.layerState, `layer is ${freshRef.state}`, { layerId: ref.id });
+  }
+  if (freshRef.checkpoint !== ref.checkpoint) {
+    const freshCp = decodeCheckpoint(await repo.store.readChecked(freshRef.checkpoint, 4));
+    if (freshCp.rootId === rootId) return freshRef.checkpoint;
+    throw fail(CODES.busy, "layer checkpoint advanced concurrently; retry", { layerId: ref.id, retryable: true });
+  }
+  const before = await repo.store.readChecked(ref.checkpoint, 4);
+  const prev = decodeCheckpoint(before);
   if (rootId === prev.rootId) return ref.checkpoint;
   await stager.flush(repo.store);
   const cpBytes = encodeCheckpoint({
@@ -231,9 +253,22 @@ export async function flushLayer(repo: Repo, selector: string): Promise<string> 
     contextIds: prev.contextIds
   });
   const cpId = await repo.store.put(cpBytes);
-  const next = structuredClone(refs);
-  next.layers[ref.id] = { ...ref, checkpoint: cpId };
-  await saveRefs(repo.metaDir, next);
+  const latest = await loadRefs(repo.metaDir);
+  const latestRef = latest.layers[ref.id];
+  if (latestRef === undefined) throw fail(CODES.layerNotFound, `no such layer`, { layerId: ref.id });
+  if (latestRef.state !== "active") {
+    throw fail(CODES.layerState, `layer is ${latestRef.state}`, { layerId: ref.id });
+  }
+  if (latestRef.checkpoint !== ref.checkpoint) {
+    const latestCp = decodeCheckpoint(await repo.store.readChecked(latestRef.checkpoint, 4));
+    if (latestCp.rootId === rootId) return latestRef.checkpoint;
+    throw fail(CODES.busy, "layer checkpoint advanced concurrently; retry", { layerId: ref.id, retryable: true });
+  }
+  const next = structuredClone(latest);
+  next.layers[ref.id] = { ...latestRef, checkpoint: cpId };
+  if (!await casRefs(repo.metaDir, latest, next)) {
+    throw fail(CODES.busy, "layer checkpoint advanced concurrently; retry", { layerId: ref.id, retryable: true });
+  }
   return cpId;
 }
 
@@ -350,6 +385,9 @@ export async function deleteLayer(repo: Repo, selector: string): Promise<void> {
   const refs = await loadRefs(repo.metaDir);
   const ref = resolveLayerRef(refs, selector);
   if (ref.state === "deleted") return;
+  if (ref.state !== "active" && ref.state !== "closed") {
+    throw fail(CODES.layerState, `layer is ${ref.state}`, { layerId: ref.id });
+  }
   for (const entry of await listJournals(repo.metaDir)) {
     if (entry.state === "finalized" || entry.state === "accepted" || entry.state === "conflict") continue;
     const cites = entry.layerId === ref.id || JSON.stringify(entry.payload).includes(ref.id) || JSON.stringify(entry.payload).includes(ref.checkpoint);

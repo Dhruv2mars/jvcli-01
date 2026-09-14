@@ -370,16 +370,11 @@ describe("concurrency matrix: stack vs source delete", () => {
       const list = runCliJson(repo, ["layer", "list"]);
       expect(list.code).toBe(0);
       const byId = new Map((list.json.layers as Array<any>).map((l) => [l.id, l]));
-      if (stackOk && delOk) {
-        // Delete slipped in before stack journalled its window (node-boot
-        // stagger): stack likely stacked the pre-delete flush, so the dead
-        // source must read back as consumed while the destination is whole.
-        // This interleaving is accepted but must still leave no partial dest.
-        expect(byId.get(d.id)?.state).toBe("consumed");
-        const destWs = requireJson(stackRes, "stack result").workspace as string;
-        expect(readFileSync(join(destWs, "sc.txt"), "utf8")).toBe("from-c\n");
-        expect(readFileSync(join(destWs, "sd.txt"), "utf8")).toBe("from-d\n");
-      } else if (stackOk) {
+      // Stack journals its intent before flushing, so exactly one op wins:
+      // the loser fails with a documented code and sources keep terminal
+      // states. Both-succeed with a consumed deleted source is rejected.
+      expect(stackOk && delOk).toBe(false);
+      if (stackOk) {
         // Stack won the race: delete lost with retryable E_BUSY and the
         // stack result is fully intact.
         expect(delRes.json.error.code).toBe("E_BUSY");
@@ -405,6 +400,111 @@ describe("concurrency matrix: stack vs source delete", () => {
       }
 
       // Neither op creates worlds; the repo stays consistent on every path.
+      expectContiguousWorlds(repo, 1);
+      expectVerifyFull(repo);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  // Deterministic regression for the stack/delete lost update (no sleeps,
+  // no spawned overlap): stack journals its intent first, then a racing
+  // delete must refuse with retryable E_BUSY while the stack journal is
+  // live, and the stack must then land with both sources consumed and a
+  // whole destination. Covers the flushLayer blind-write window: the old
+  // flush resurrected a tombstoned layer via stale saveRefs, so the final
+  // CAS consumed a deleted source; the new CAS-aware flush plus journal
+  // guard converges to exactly one winner instead.
+  test("stack-then-delete: live stack journal blocks delete, stack lands whole", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const c = createLayer(repo, "RC");
+      const d = createLayer(repo, "RD");
+      writeWs(repo, c.id, "sc.txt", "from-c\n");
+      writeWs(repo, d.id, "sd.txt", "from-d\n");
+      const ckptC = checkpointOf(repo, c.id);
+      const ckptD = checkpointOf(repo, d.id);
+      const stackOp = "e".repeat(32);
+
+      // Journal the stack intent directly (what stack does before its
+      // flushes): a racing delete must refuse with retryable E_BUSY.
+      runCliJson(repo, ["stack", c.id, d.id, "--into", "combo", "--operation-id", stackOp], {
+        JVCLI_FAULT: "stack:after-prepared"
+      });
+      const del = runCliJson(repo, ["layer", "delete", c.id]);
+      expect(del.code).toBe(1);
+      expect(del.json.ok).toBe(false);
+      expect(del.json.error.code).toBe("E_BUSY");
+      expect(del.json.error.retryable).toBe(true);
+
+      // Sources untouched while the stack journal is live.
+      let list = runCliJson(repo, ["layer", "list"]);
+      expect(list.code).toBe(0);
+      let byId = new Map((list.json.layers as Array<any>).map((l) => [l.id, l]));
+      expect(byId.get(c.id)?.state).toBe("active");
+      expect(byId.get(d.id)?.state).toBe("active");
+      expect(checkpointOf(repo, c.id)).toBe(ckptC);
+      expect(checkpointOf(repo, d.id)).toBe(ckptD);
+
+      // Retrying the same stack op-id resumes past prepared and lands
+      // whole: both sources consumed, destination has both files.
+      const s = runCliJson(repo, ["stack", c.id, d.id, "--into", "combo", "--operation-id", stackOp]);
+      expect(s.code).toBe(0);
+      list = runCliJson(repo, ["layer", "list"]);
+      expect(list.code).toBe(0);
+      byId = new Map((list.json.layers as Array<any>).map((l) => [l.id, l]));
+      expect(byId.get(c.id)?.state).toBe("consumed");
+      expect(byId.get(d.id)?.state).toBe("consumed");
+      const destWs = s.json.workspace as string;
+      expect(readFileSync(join(destWs, "sc.txt"), "utf8")).toBe("from-c\n");
+      expect(readFileSync(join(destWs, "sd.txt"), "utf8")).toBe("from-d\n");
+
+      expectContiguousWorlds(repo, 1);
+      expectVerifyFull(repo);
+    } finally {
+      rmTemp(t.base);
+    }
+  });
+
+  // Mirror ordering, fully serial and sleep-free: delete's CAS lands
+  // first, then stack must fail on the terminal source with E_LAYER_STATE,
+  // leave the sibling active at its pre-stack checkpoint, create no
+  // destination, and never resurrect the deleted layer. Raw refs.json is
+  // checked because `layer list` hides deleted layers.
+  test("delete-then-stack fails cleanly with no resurrection and no partial dest", () => {
+    const t = mkTempRepo({ "a.txt": "base\n" });
+    try {
+      const repo = t.repo;
+      const c = createLayer(repo, "RC");
+      const d = createLayer(repo, "RD");
+      writeWs(repo, c.id, "sc.txt", "from-c\n");
+      writeWs(repo, d.id, "sd.txt", "from-d\n");
+      const ckptD = checkpointOf(repo, d.id);
+
+      const del = runCliJson(repo, ["layer", "delete", c.id]);
+      expect(del.code).toBe(0);
+
+      const s = runCliJson(repo, ["stack", c.id, d.id, "--into", "combo"]);
+      expect(s.code).toBe(1);
+      expect(s.json.ok).toBe(false);
+      expect(s.json.error.code).toBe("E_LAYER_STATE");
+
+      const list = runCliJson(repo, ["layer", "list"]);
+      expect(list.code).toBe(0);
+      const byId = new Map((list.json.layers as Array<any>).map((l) => [l.id, l]));
+      expect(byId.has(c.id)).toBe(false);
+      expect(byId.get(d.id)?.state).toBe("active");
+      expect(checkpointOf(repo, d.id)).toBe(ckptD);
+      expect(readWs(repo, d.id, "sd.txt")).toBe("from-d\n");
+      expect((list.json.layers as Array<any>).some((l) => l.name === "combo")).toBe(false);
+
+      const refs = JSON.parse(readFileSync(join(repo, ".javelin", "refs.json"), "utf8")) as {
+        layers: Record<string, { state: string }>;
+      };
+      expect(refs.layers[c.id]?.state).toBe("deleted");
+      expect(refs.layers[d.id]?.state).toBe("active");
+
       expectContiguousWorlds(repo, 1);
       expectVerifyFull(repo);
     } finally {
