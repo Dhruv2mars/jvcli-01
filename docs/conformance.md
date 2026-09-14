@@ -158,11 +158,12 @@ surface conflicts as `E_CONFLICT` (exit `2`) with sorted `paths`.
 7. Context completeness: shipped for all four levels. `0` open on begin,
    `1` complete on a gap free end, `2` interrupted, and `3` gapped when an
    append or a complete end leaves ordinal gaps. Level 3 gates publish as
-   missing with the same `--allow-missing-context` override. A sealed
-   session cannot be reopened, so completeness 3 is terminal in v1.
+   missing with the same `--allow-missing-context` override. Level 3 is
+   not terminal: appending the missing ordinals and re-ending reaches
+   completeness 1. Sealed sessions (completeness 1 or 2) reject appends.
 8. Diagnostics bundle redaction: shipped. The bundle carries ids and counts
    only and never payload bytes, context text, or workspace paths, enforced
-   by two canary tests. Caveat: redaction is structural, the bundle simply
+   by two canaries in one test. Caveat: redaction is structural, the bundle simply
    never reads payloads, so a new bundle field needs its own canary; there
    is no generic scrubber.
 9. No git interoperation: jvcli neither reads nor writes git metadata.
