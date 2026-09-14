@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-14
 
 Added:
 
@@ -13,6 +13,15 @@ Added:
 - `scripts/ga-walkthrough.sh` plus `scripts/pack-smoke.sh`, both gated in CI.
 - Reference-model property tests for the merge engine.
 - Measured performance budgets at 5 and 100 layers.
+- `checkpoint` and `watch` commands on a coalescing checkpoint engine, with
+  CAS advance so concurrent writers retry instead of losing checkpoints.
+- `timeline` command: read-only rows over worlds, publications, checkpoints,
+  refresh and stack records, context, and journals, carrying no payload
+  bytes or workspace paths.
+- Workspace backend contract with `fs` and in-memory backends plus a
+  cross-backend conformance suite.
+- GA design packages and the 178-pass suite log preserved under
+  `docs/audit`.
 
 Fixed:
 
@@ -21,6 +30,23 @@ Fixed:
 - GC pins live journal objects and quarantines fresh writes.
 - Delete refuses while a live journal cites the layer.
 - Journal-checkpoint adopt on retry uses compare-and-swap.
+- Merges are executable-aware: chmod-only edits surface as metadata changes
+  and conflict against content edits, and the fs fingerprint carries the
+  exec bit.
+- The CLI fails closed on any stdout or stderr stream error, including
+  `EPIPE`, instead of exiting success with missing output.
+- Refresh, context, and checkpoint paths advance under CAS; stack resume
+  validates sources and target.
+- Verify cross-checks publication state and walks record bodies across the
+  full checkpoint chain.
+- GC sweeps tmp orphans and prunes settled journals.
+- Symlink escape check is root-relative; publish and stack skip flag values
+  when finding selectors.
+- Op ids bind to layers; stale publish journals retry as stale; missing
+  context is retryable; ambiguous layer prefixes report `E_AMBIGUOUS_LAYER`.
+- `show` writes blob bytes raw.
+- e2e harness raises the spawn buffer cap and reports fork failures
+  explicitly instead of surfacing them as empty output.
 
 ## [0.1.0] - 2026-09-13
 
