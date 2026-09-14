@@ -58,8 +58,11 @@ Core (storage primitives and encoding):
   operations (`newId16`).
 - `src/core/types.ts`: id brands, object type numbers 1 to 9, layer states,
   `JvError`, and the `CODES` table.
-- `src/core/workspace/`: reserved for future workspace backends. Empty in
-  v1, which uses plain filesystem directories.
+- `src/core/workspace/`: the `WorkspaceBackend` interface (`backend.ts`)
+  with the shipped `FsBackend` (plain filesystem directories, `fs.ts`) and
+  a `MemoryBackend` reference implementation used by
+  `tests/workspace-conformance.test.ts`. FSKit, OverlayFS, and ProjFS do
+  not exist.
 
 ## Object model
 
@@ -81,7 +84,7 @@ recomputes the hash). The 9 types, with numeric tags from
 5. `context-object`: one agent record. Fields: format, kind, ordinal, bytes.
 6. `context-manifest`: one session. Fields: repo id, layer id, session id,
    parent session id, ordered object ids, completeness (0 open, 1 complete,
-   2 interrupted, 3 reserved), gaps.
+   2 interrupted, 3 gapped when ordinal gaps exist), gaps.
 7. `publication`: publish record. Fields: layer id, checkpoint id, anchor
    id, prior world id, result root id, sequence number, context ids, actor,
    override flag, operation id.
@@ -202,7 +205,9 @@ epoch counters.
 
 Deleted layers are excluded from the roots, so their private checkpoints
 become collectible once no world or record cites them. Journal files are
-not object roots and are never swept by GC.
+not object roots; the reachability sweep never touches them as objects, and
+the gc pass prunes settled journals separately past 7 days beyond the
+newest 100 (`pruneJournals` in `src/domain-verify.ts`).
 
 ## Deliberately deferred
 
@@ -215,6 +220,7 @@ not object roots and are never swept by GC.
   local publish.
 - Persistent GC epochs: collection is a single foreground pass per `gc`
   invocation, not a scheduled multi epoch collector.
-- Golden vector suite: canonical encodings are defined by
-  `src/core/cbor.ts` and checked by hash on read, but no checked in
-  fixture vectors ship with v1.
+- Golden vector cross check: fixture vectors ship in
+  `tests/fixtures/golden-vectors.json` and are byte checked by
+  `tests/golden-vectors.test.ts`, but they come from the shipped encoders.
+  No independent CBOR or BLAKE3 implementation cross checks the encoding.
