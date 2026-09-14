@@ -1,6 +1,6 @@
 {
-  "_note": "Baselines measured on Apple Silicon (darwin/arm64) dev machine, 2026-09-13. Rerun bun benchmarks/run.ts to refresh.",
-  "machine": "darwin/arm64 dev machine",
+  "_note": "Baselines measured on Apple Silicon (darwin/arm64) dev machine. baselines5/baselines100 (2026-09-13) used batch-total publish timing (reps=1, one batch sample); baselines1000 (2026-09-14) uses per-publish percentiles after the run.ts fix (floor(layers/2) individually timed publishes). Rerun bun benchmarks/run.ts to refresh.",
+  "machine": "darwin/arm64 dev machine (budgets1000 measured 2026-09-14; budgets5/100 measured 2026-09-13)",
   "workload5": { "layers": 5, "filesPerLayer": 5 },
   "baselines5": {
     "publishP50Ms": 850,
@@ -16,6 +16,15 @@
     "statusMs": 300,
     "bytesPerLayer": 4144,
     "objects": 553
+  },
+  "workload1000": { "layers": 1000, "filesPerLayer": 5 },
+  "baselines1000": {
+    "publishP50Ms": 894,
+    "publishP95Ms": 1235,
+    "verifyMs": 50596,
+    "statusMs": 3415,
+    "bytesPerLayer": 4302,
+    "objects": 7503
   },
   "regression": {
     "metric": "publishP50Ms",
