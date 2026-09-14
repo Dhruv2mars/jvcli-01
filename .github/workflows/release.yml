@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/release-tag.mjs "${GITHUB_REF_NAME}"
+
+  create_release:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build_upload:
+    needs: create_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: npm pack
+      - run: gh release upload "${GITHUB_REF_NAME}" jvcli-01-*.tgz --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish_npm:
+    needs: build_upload
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+      - run: npm install -g npm@latest
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: |
+          set -euo pipefail
+          local_v="$(node -p "require('./package.json').version")"
+          remote_v="$(npm view jvcli-01 version 2>/dev/null || true)"
+          if [ -n "${remote_v:-}" ] && [ "${remote_v}" = "${local_v}" ]; then
+            echo "skip: already on npm (${remote_v})"
+            exit 0
+          fi
+          rc="${RUNNER_TEMP:-/tmp}/npmrc"
+          echo "registry=https://registry.npmjs.org/" > "$rc"
+          export NPM_CONFIG_USERCONFIG="$rc"
+          unset NODE_AUTH_TOKEN || true
+          npm publish --provenance --access public
