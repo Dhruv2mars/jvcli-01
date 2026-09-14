@@ -385,6 +385,9 @@ export async function deleteLayer(repo: Repo, selector: string): Promise<void> {
   const refs = await loadRefs(repo.metaDir);
   const ref = resolveLayerRef(refs, selector);
   if (ref.state === "deleted") return;
+  if (ref.state !== "active" && ref.state !== "closed") {
+    throw fail(CODES.layerState, `layer is ${ref.state}`, { layerId: ref.id });
+  }
   for (const entry of await listJournals(repo.metaDir)) {
     if (entry.state === "finalized" || entry.state === "accepted" || entry.state === "conflict") continue;
     const cites = entry.layerId === ref.id || JSON.stringify(entry.payload).includes(ref.id) || JSON.stringify(entry.payload).includes(ref.checkpoint);
