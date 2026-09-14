@@ -1,6 +1,8 @@
 # jvcli command reference
 
-Executable: `jvcli` (installed as `dist/cli.js`; during development use `node dist/cli-entry.js`).
+Executable: `jvcli`. The npm `bin` entries `jvcli` and `jvcli-01` in
+`package.json` both point at `dist/cli-entry.js`; during development use
+`node dist/cli-entry.js`.
 All flag spellings below match `src/cli.ts` and `node dist/cli-entry.js --help` exactly.
 
 ## Global conventions
@@ -12,9 +14,10 @@ directory search finds `.javelin/repo.json`. Repo discovery is in `src/locate.ts
 lines show `[--json]` on every command except `init` and
 `diagnostics bundle`, but `src/cli.ts` honors `--json` on `init` too, so
 `jvcli init --json` works despite the omission in `--help`. For
-`diagnostics bundle`, behavior is special: stdout is always the JSON bundle
-whether or not `--output <path>` is passed; with `--output` the same bundle
-is also written to that file and the JSON gains an `output` path. For `show`
+`diagnostics bundle`, behavior is special: without `--output` stdout is
+always the JSON bundle whether or not `--json` is passed; with `--output`
+the bundle is also written to that file and stdout is the human line
+`bundle: <path>` unless `--json` is passed. For `show`
 of a blob, stdout is the raw blob bytes with or without `--json` (see `show`).
 
 Layer selectors accept a full id, a unique id prefix, or a unique layer name
@@ -188,7 +191,8 @@ jvcli diff v1 v2 --json
 ```
 
 JSON shape: `{ ok, left, right, changes: [{ path, kind, oldBlob, newBlob }] }`.
-Observed `kind` values are `add`, `modify`, `delete`, `type-change`.
+Observed `kind` values are `add`, `modify`, `delete`, `type-change`, and
+`metadata-change`.
 Exit codes: `1` for unresolvable selectors.
 
 ## verify
@@ -233,8 +237,9 @@ Prints a small JSON bundle (`version`, `repo`, `world`, layer and world
 counts, per-state layer counts, stale layer count, journal counts by state
 plus operation ids, a non-full verify summary, `platform`, `node`). With
 `--output <path>` it also writes the bundle
-to that file and reports the resolved `output` path inside the JSON. Stdout is
-always JSON, with or without `--output`.
+to that file and reports the resolved `output` path inside the JSON. Without
+`--output`, stdout is always JSON; with `--output`, stdout is the human
+`bundle: <path>` line unless `--json` is passed.
 File bytes and context payloads are never included.
 
 Example:
@@ -244,6 +249,9 @@ jvcli diagnostics bundle --output /tmp/jvdiag.json
 ```
 
 JSON shape: `{ ok, version: 1, repo, world: { seq, id }, layers, layerStates, staleLayers, worlds, journals: { total, byState, liveOperationIds, archived }, verify: { ok, worlds, layers, objects }, platform, node[, output] }`. `layers` counts every retained ref including tombstones, so it equals the sum of `layerStates`. `liveOperationIds` lists every non-terminal journal id with no cap, and `archived` counts the terminal ones.
+Without `--output`, stdout is always JSON. With `--output`, stdout is the
+human `bundle: <path>` line unless `--json` is passed; the file always
+contains the bundle.
 Exit codes: `1` for anything other than the `bundle` subcommand.
 
 ## layer create
@@ -470,7 +478,7 @@ Example:
 jvcli context status --layer my-feature --json
 ```
 
-JSON shape: `{ ok, layer, missing, sessions: [{ session, manifest, completeness, objects, bytes }] }`.
+JSON shape: `{ ok, layer, missing, sessions: [{ session, manifest, completeness, objects, bytes, gaps }] }`.
 `missing` is true when a session is incomplete or an agent claimed the layer
 without sessions.
 Exit codes: `1` for unknown layers.
@@ -520,8 +528,9 @@ Exit codes: `1` for unknown layers, bad session ids, or agent conflicts.
 
 Usage: `jvcli context append --layer <id> --session <id> --kind <k> [--ordinal <n>] [--text <t>] [--file <p>] [--json]`
 
-Appends one context object to a session. `--kind` defaults to `note`. Exactly
-one of `--text <t>` or `--file <p>` is required. `--ordinal <n>` pins the
+Appends one context object to a session. `--kind` defaults to `note`. At
+least one of `--text <t>` or `--file <p>` is required; when both are
+given, `--file` wins. `--ordinal <n>` pins the
 record ordinal for adapters that retransmit; without it the next free ordinal
 is used. Duplicate ordinals fail, appends to a sealed session fail, and a gap
 in the ordinal sequence marks the manifest completeness `3` with gap ranges.
