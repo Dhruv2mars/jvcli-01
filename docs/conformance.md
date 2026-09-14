@@ -213,10 +213,29 @@ surface conflicts as `E_CONFLICT` (exit `2`) with sorted `paths`.
 
 ## Bench state
 
-CI runs the smoke workload only: `bun benchmarks/run.ts --layers 5 --files
-5`. `benchmarks/budgets.json` records measured baselines for the 5 layer and
-100 layer workloads and defines a regression rule, fail if publish p50
-regresses more than 20 percent, but no check enforces that rule.
-`tests/budgets.test.ts` only validates the budgets file shape, and the CI
-workflow has no 100 layer or budget comparison step. The 100 layer baselines
-are reference numbers, not a gated check.
+CI runs the smoke workload and gates it: `bun benchmarks/run.ts --layers 5
+--files 5 | tee /tmp/jvcli-bench.json`, then `bun benchmarks/check.ts
+"$(cat /tmp/jvcli-bench.json)"`, so a budget regression fails the CI job.
+
+`benchmarks/check.ts` reads the bench JSON line, compares publish p50
+against the same-workload baseline in `benchmarks/budgets.json`, and exits
+`0` within the threshold, `1` on regression, and `2` on usage errors. The
+rule is threshold `1.2` in `benchmarks/budgets.json`: fail if publish p50
+regresses more than 20 percent versus the same-workload baseline. Budgets
+carry measured baselines for the 5, 100, and 1000 layer workloads.
+`tests/budgets.test.ts` validates the budgets file, asserts the check
+passes at baseline and fails on a regressed fixture, and asserts the
+`check.ts` subprocess exits `0` and `1` on those same fixtures. The CI
+gate runs the 5 layer workload only, so the 100 and 1000 layer baselines
+stay reference numbers, not a gated check.
+
+## Release state
+
+v1 packages as the npm package `jvcli-01` at version `0.2.0`, with bin
+entries `jvcli` and `jvcli-01` both pointing at `dist/cli-entry.js`.
+Version 0.2.0 is cut and its change list is in `CHANGELOG.md`. Packaging
+is gated: `prepack` builds the package, and `scripts/pack-smoke.sh`
+builds, packs, installs the tarball into a temp directory with
+dependencies, and runs the GA walkthrough against the installed binary;
+CI runs the same script. There is no publish workflow:
+`.github/workflows/` contains only `ci.yml`.

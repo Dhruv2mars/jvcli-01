@@ -33,6 +33,14 @@ Domains (one file per concern):
   `sessionEnd`, `layerContextStatus`, `collectLayerContexts`.
 - `src/domain-verify.ts`: integrity and reclamation. `verifyRepo`,
   `gcRepo`.
+- `src/domain-timeline.ts`: read-only history rows. `timelineRepo`
+  assembles rows over worlds, publications, checkpoints, refresh and
+  stack records, context manifests, and journals; `formatTimelineHuman`
+  renders the human output.
+- `src/domain-watch.ts`: checkpoint commands. `checkpointSingleLayer`,
+  `checkpointAllLayers`, and `runWatchCycle` route dirty layers through
+  the checkpoint engine; `parseWatchInterval` bounds `watch --interval`
+  to 250 to 60000 ms with a 2000 ms default.
 
 Core (storage primitives and encoding):
 
@@ -44,6 +52,12 @@ Core (storage primitives and encoding):
 - `src/core/store.ts`: `ObjectStore`. Sharded layout
   `objects/<aa>/<rest>`, atomic put through `tmp/` with fsync, hash
   verification on every read, collision detection.
+- `src/core/checkpoint.ts`: the coalescing checkpoint engine
+  (`createCheckpointEngine`). Requests for the same layer, record, and
+  context set collapse into one pending entry, and `drain` runs each
+  entry as a journaled checkpoint operation (`prepared`,
+  `objects_durable`, `finalized`) with the checkpoint fault points
+  wired in.
 - `src/core/refs.ts`: `refs.json` load, save, and CAS (`casRefs`),
   `resolveLayerRef`, and the per operation journal
   (`appendJournal`, `readJournal`, `updateJournal`).
@@ -61,8 +75,9 @@ Core (storage primitives and encoding):
 - `src/core/workspace/`: the `WorkspaceBackend` interface (`backend.ts`)
   with the shipped `FsBackend` (plain filesystem directories, `fs.ts`) and
   a `MemoryBackend` reference implementation used by
-  `tests/workspace-conformance.test.ts`. FSKit, OverlayFS, and ProjFS do
-  not exist.
+  `tests/workspace-conformance.test.ts`; `exec.ts` holds the
+  executable-bit helper the fs backend uses. FSKit, OverlayFS, and ProjFS
+  do not exist.
 
 ## Object model
 
