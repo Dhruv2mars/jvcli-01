@@ -262,6 +262,21 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   const sources = selectors.map((s) => resolveLayerRef(refs0, s));
   if (stacked !== null) {
     if (stacked.kind !== "stack") throw fail(CODES.io, "operation id belongs to another op", { operationId: opId });
+    if (stacked.state === "prepared") {
+      const resumed = stacked.payload as { sources?: ReadonlyArray<string>; checkpoints?: ReadonlyArray<string>; into?: string | null };
+      const sameSources = resumed.sources !== undefined
+        && resumed.sources.length === sources.length
+        && sources.every((s) => resumed.sources!.includes(s.id));
+      const sameInto = (resumed.into ?? null) === (name ?? null);
+      if (!sameSources || !sameInto) {
+        throw fail(CODES.io, `operation id ${opId} belongs to a different stack`, { operationId: opId });
+      }
+      for (const s of sources) {
+        if (s.state !== "active") throw fail(CODES.layerState, `layer ${s.id} is ${s.state}`, { layerId: s.id, operationId: opId });
+      }
+      const tail = await continueStackAfterPrepared(repo, opId, sources.map((s) => s.id), name);
+      return { ...tail, operationId: opId };
+    }
     if (stacked.state === "finalized" || stacked.state === "accepted") {
       const prior = stacked.payload as { dest: string; sources?: ReadonlyArray<string>; into?: string | null; order?: ReadonlyArray<string> };
       if (stacked.state === "finalized") {
@@ -296,10 +311,65 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     const clash = Object.values(refs0.layers).some((l) => l.name === name && l.state !== "deleted");
     if (clash) throw fail(CODES.io, `layer name taken: ${name}`);
   }
-  const cpIds: Array<string> = [];
-  for (const s of sources) cpIds.push(await flushLayer(repo, s.id));
+  await appendJournal(repo.metaDir, {
+    op: opId,
+    kind: "stack",
+    state: "prepared",
+    layerId: sources[0]!.id,
+    operationId: opId,
+    payload: { sources: sources.map((s) => s.id), checkpoints: sources.map((s) => s.checkpoint), into: name ?? null },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  await crashIf("stack:after-prepared");
+  const tail = await continueStackAfterPrepared(repo, opId, sources.map((s) => s.id), name);
+  return { ...tail, operationId: opId };
+}
+
+async function continueStackAfterPrepared(
+  repo: Repo,
+  opId: string,
+  sourceIds: ReadonlyArray<string>,
+  name: string | undefined
+): Promise<{ destId: string; workspace: string; order: ReadonlyArray<string> }> {
+  const refsPre = await loadRefs(repo.metaDir);
+  const sources = sourceIds.map((id) => {
+    const r = refsPre.layers[id];
+    if (r === undefined) throw fail(CODES.layerState, `source layer ${id} is missing`, { layerId: id, operationId: opId });
+    return r;
+  });
+  let cpIds: Array<string>;
+  try {
+    cpIds = [];
+    for (const s of sources) cpIds.push(await flushLayer(repo, s.id));
+  } catch (e) {
+    if (e instanceof Error && (e as { code?: string }).code === CODES.layerState) {
+      await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { sources: [...sourceIds], into: name ?? null, error: (e as Error).message } }).catch(() => {});
+      const lid = (e as { layerId?: string }).layerId;
+      if (lid === undefined) throw fail(CODES.layerState, (e as Error).message, { operationId: opId });
+      throw fail(CODES.layerState, (e as Error).message, { layerId: lid, operationId: opId });
+    }
+    if (e instanceof Error && (e as { code?: string }).code === CODES.busy) {
+      await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { sources: [...sourceIds], into: name ?? null, error: (e as Error).message } }).catch(() => {});
+      const lid = (e as { layerId?: string }).layerId;
+      if (lid === undefined) throw fail(CODES.busy, (e as Error).message, { operationId: opId, retryable: true });
+      throw fail(CODES.busy, (e as Error).message, { layerId: lid, operationId: opId, retryable: true });
+    }
+    await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { sources: [...sourceIds], into: name ?? null, error: e instanceof Error ? e.message : String(e) } }).catch(() => {});
+    throw e;
+  }
   const refs = await loadRefs(repo.metaDir);
-  const live = sources.map((s) => refs.layers[s.id]!);
+  const live = sourceIds.map((id) => {
+    const r = refs.layers[id];
+    if (r === undefined) throw fail(CODES.layerState, `source layer ${id} is missing`, { layerId: id, operationId: opId });
+    return r;
+  });
+  for (const s of live) {
+    if (s.state !== "active") {
+      await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { sources: live.map((x) => x.id), into: name ?? null } }).catch(() => {});
+      throw fail(CODES.layerState, `source layer ${s.id} is ${s.state}`, { layerId: s.id, operationId: opId });
+    }
+  }
   const cur = await currentWorldId(repo);
   const curW = decodeWorldVersion(await repo.store.readChecked(cur, 3));
   const curFlat = await flattenRoot(repo.store, curW.rootId);
@@ -321,6 +391,7 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     ]);
     const norm = structuralCompatible(toExecView(anchorFlat, anchorExecFlat), curView, toExecView(layerFlat, layerExecFlat));
     if (!norm.ok) {
+      await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { sources: live.map((x) => x.id), into: name ?? null } });
       throw fail(CODES.conflict, `cannot normalize layer ${live[i]!.id} onto current world`, {
         layerId: live[i]!.id,
         operationId: opId,
@@ -348,6 +419,7 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     const accView = { files: new Map([...acc.files].map(([p, b]) => [p, { blob: b, executable: accExec.get(p) ?? false }] as const)), symlinks: acc.symlinks };
     const v = structuralCompatible(curView, accView, toContribView(c));
     if (!v.ok) {
+      await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { sources: live.map((x) => x.id), into: name ?? null } });
       throw fail(CODES.conflict, "stack conflicts", { operationId: opId, paths: v.conflicts.map((x) => x.path), hint: "resolve in source layers and retry" });
     }
     for (const [path, blob] of v.merged.files) {
@@ -359,17 +431,10 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
     }
     acc = { files: new Map(v.merged.files), symlinks: new Map(v.merged.symlinks) };
   }
-  await appendJournal(repo.metaDir, {
-    op: opId,
-    kind: "stack",
+  await updateJournal(repo.metaDir, opId, {
     state: "prepared",
-    layerId: live[0]!.id,
-    operationId: opId,
-    payload: { sources: live.map((s) => s.id), into: name ?? null },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  });
-  await crashIf("stack:after-prepared");
+    payload: { sources: live.map((s) => s.id), checkpoints: cpIds, into: name ?? null }
+  }).catch(() => {});
   const flat = { files: new Map([...acc.files].map(([path, blobId]) => [path, { blobId, executable: accExec.get(path) ?? false }] as const)), symlinks: acc.symlinks };
   const hydrated = await hydrate(repo.store, flat);
   const files = new Map<string, { bytes: Uint8Array; executable: boolean }>(hydrated);
@@ -399,9 +464,14 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   const destCp = encodeCheckpointObj({ layerId: destId, originKind: 1, originId: cur, anchorId: cur, rootId: builtRoot, prevId: null, recordId: stackId, contextIds });
   const destCpId = await repo.store.put(destCp);
   const snapshot = await loadRefs(repo.metaDir);
-  for (const s of live) {
+  for (let i = 0; i < live.length; i++) {
+    const s = live[i]!;
     const curRef = snapshot.layers[s.id];
-    if (curRef === undefined || curRef.state !== "active") throw fail(CODES.busy, "source changed during stack; retry", { operationId: opId, retryable: true });
+    if (curRef === undefined || curRef.state !== "active" || curRef.checkpoint !== cpIds[i]) {
+      await updateJournal(repo.metaDir, opId, { state: "conflict", payload: { sources: live.map((x) => x.id), into: name ?? null } });
+      const code = curRef === undefined || curRef.state !== "active" ? CODES.layerState : CODES.busy;
+      throw fail(code, `source layer ${s.id} is ${curRef?.state ?? "missing"}; retry as a new operation`, { layerId: s.id, operationId: opId, retryable: code === CODES.busy });
+    }
   }
   const stacksDurable = updateJournal(repo.metaDir, opId, { state: "objects_durable", payload: { dest: destId, sources: live.map((s) => s.id), into: name ?? null, cpIds, root: builtRoot, stack: stackId, checkpoint: destCpId, order } });
   await stacksDurable;
@@ -419,7 +489,7 @@ export async function stackLayers(repo: Repo, selectors: ReadonlyArray<string>, 
   await updateJournal(repo.metaDir, opId, { state: "accepted", payload: { dest: destId, order, sources: live.map((s) => s.id), into: name ?? null } });
   await crashIf("stack:after-accepted");
   await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { dest: destId, order, sources: live.map((s) => s.id), into: name ?? null } });
-  return { destId, workspace: ws, operationId: opId, order };
+  return { destId, workspace: ws, order };
 }
 
 /**
