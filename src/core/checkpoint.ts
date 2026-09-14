@@ -62,9 +62,16 @@ export function createCheckpointEngine(): CheckpointEngine {
           updatedAt: new Date().toISOString()
         });
         try {
+          if (checkpointFaultEnabled("checkpoint:after-prepared")) {
+            throw fail(CODES.interrupted, "fault injected at checkpoint:after-prepared", { layerId: req.layerId, operationId: opId, retryable: true, hint: "retry the checkpoint" });
+          }
           const { checkpointLayer } = await import("../domain-layers.js");
           const before = await currentCheckpoint(repo, req.layerId);
           const cp = await checkpointLayer(repo, req.layerId, req.recordId, req.contextIds);
+          await updateJournal(repo.metaDir, opId, { state: "objects_durable", payload: { checkpoint: cp } });
+          if (checkpointFaultEnabled("checkpoint:after-objects-durable")) {
+            throw fail(CODES.interrupted, "fault injected at checkpoint:after-objects-durable", { layerId: req.layerId, operationId: opId, retryable: true, hint: "retry the checkpoint" });
+          }
           await updateJournal(repo.metaDir, opId, { state: "finalized", payload: { checkpoint: cp } });
           out.push({ checkpoint: cp, created: cp !== before });
         } catch (e) {
@@ -90,6 +97,10 @@ async function currentCheckpoint(repo: Repo, layerId: string): Promise<string> {
   const ref = refs.layers[layerId];
   if (ref === undefined) throw fail(CODES.layerNotFound, "no such layer", { layerId });
   return ref.checkpoint;
+}
+
+function checkpointFaultEnabled(name: string): boolean {
+  return (process.env.JVCLI_FAULT ?? "").split(",").map((s) => s.trim()).filter(Boolean).includes(name);
 }
 
 export async function liveCheckpointOps(repo: Repo): Promise<number> {
