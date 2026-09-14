@@ -18,4 +18,5 @@ jobs:
       - run: bun run test
       - run: scripts/ga-walkthrough.sh dist/cli-entry.js
       - run: sh scripts/pack-smoke.sh
-      - run: bun benchmarks/run.ts --layers 5 --files 5
+      - run: bun benchmarks/run.ts --layers 5 --files 5 | tee /tmp/jvcli-bench.json
+      - run: bun benchmarks/check.ts "$(cat /tmp/jvcli-bench.json)"

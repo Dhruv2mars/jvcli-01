@@ -5,8 +5,12 @@
 // { layers, filesPerLayer, publishP50Ms, publishP95Ms, verifyMs,
 //   statusMs, bytesPerLayer, objects }.
 // Progress and diagnostics go to stderr so stdout stays parseable.
-// Timing uses wall clock milliseconds. bytesPerLayer is the average file
-// bytes written per layer. objects is the verify --full object count.
+// Timing uses wall clock milliseconds. Each of the floor(layers/2)
+// publishes is timed individually, so publishP50Ms/publishP95Ms are true
+// per-publish percentiles over those samples. verifyMs/statusMs are single
+// batch totals for one verify --full / status run. bytesPerLayer is the
+// average file bytes written per layer. objects is the verify --full
+// object count.
 
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -65,6 +69,9 @@ async function main(): Promise<void> {
     for (let i = 0; i < layers; i++) {
       const created = await cliJson<LayerCreate>(dir, ["layer", "create", "--name", `bench-${i}`]);
       ids.push(created.layer);
+      if (layers >= 100 && (i + 1) % 100 === 0) {
+        console.error(`created ${i + 1}/${layers} layers`);
+      }
       for (let j = 0; j < filesPerLayer; j++) {
         const name = `bench-${i}-file-${j}.txt`;
         const body = `benchmark layer ${i} file ${j}\n`.repeat(32);
@@ -80,12 +87,13 @@ async function main(): Promise<void> {
     if (reps > 1) {
       throw new Error("--reps above 1 needs fresh layers per rep; run the harness once per sample instead");
     }
-    {
+    for (let i = 0; i < toPublish; i++) {
       const t0 = performance.now();
-      for (let i = 0; i < toPublish; i++) {
-        await cli(dir, ["publish", ids[i]!, "--allow-missing-context", "--json"]);
-      }
+      await cli(dir, ["publish", ids[i]!, "--allow-missing-context", "--json"]);
       publishSamples.push(performance.now() - t0);
+      if (toPublish >= 100 && (i + 1) % 50 === 0) {
+        console.error(`published ${i + 1}/${toPublish}`);
+      }
     }
     publishSamples.sort((a, b) => a - b);
 
